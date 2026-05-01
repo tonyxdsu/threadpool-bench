@@ -1,9 +1,11 @@
 #ifndef THREADPOOL_HPP
 #define THREADPOOL_HPP
 
+#include <thread>
+#include <condition_variable>
 #include <functional>
 #include <vector>
-#include <thread>
+
 
 class Threadpool {
 public:
@@ -41,6 +43,16 @@ private:
      * Worker thread loop.
      */
     void worker();
+
+    /**
+     * Mutex.
+     */
+    std::mutex mutexLock;
+
+    /**
+     * Condition variable used to signal a new item in the task queue.
+     */
+    std::condition_variable hasTask;
 };
 
 #endif
