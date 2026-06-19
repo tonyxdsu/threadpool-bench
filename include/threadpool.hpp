@@ -5,6 +5,7 @@
 #include <condition_variable>
 #include <functional>
 #include <vector>
+#include <queue>
 
 
 class Threadpool {
@@ -33,6 +34,11 @@ private:
      * All worker threads.
      */
     std::vector<std::thread> threads;
+
+    /**
+     * Task queue.
+     */
+    std::queue<std::function<void()>> taskQueue;
 
     /**
      * The number of worker threads.
