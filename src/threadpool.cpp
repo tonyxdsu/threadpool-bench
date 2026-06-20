@@ -23,12 +23,18 @@ Threadpool::Threadpool(unsigned int numThreads) {
 void Threadpool::enqueue(std::function<void()> task) {
     {
         std::unique_lock<std::mutex> lock(mutexLock);
-        taskQueue.push(task);
+        taskQueue.push(task); 
     }
     hasTask.notify_one();
 }
 
 Threadpool::~Threadpool() {
+    {
+        std::unique_lock<std::mutex> lock(mutexLock);
+        stopFlag = true;
+    }
+    hasTask.notify_all();
+
     for (unsigned int i = 0; i < numThreads; i++) {
         threads[i].join();
     }
@@ -39,14 +45,20 @@ void Threadpool::worker() {
         std::function<void()> task;
         {
             std::unique_lock<std::mutex> lock(mutexLock);
-            while (taskQueue.empty()) {
+            while (taskQueue.empty() && !stopFlag) {
                 hasTask.wait(lock);
+            }
+
+            // at this point, either the queue is not empty, or the queue is empty and stopFlag = true
+
+            if (stopFlag && taskQueue.empty()) {
+                break;
             }
 
             task = taskQueue.front();
             taskQueue.pop();
         }
 
-        task();
+        task(); 
     }
 }

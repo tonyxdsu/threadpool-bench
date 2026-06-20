@@ -20,3 +20,10 @@ TEST(ThreadpoolTest, EnqueueEightTasks) {
         pool.enqueue(taskHelloWorld);
     }
 }
+
+TEST(ThreadpoolTest, EnqueueMoreTasksThanThreads) {
+    Threadpool pool(8);
+    for (int i = 0; i < 37; i++) {
+        pool.enqueue(taskHelloWorld);
+    }
+}

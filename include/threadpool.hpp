@@ -27,6 +27,12 @@ public:
      */
     ~Threadpool();
 
+    /**
+     * Queues a task for execution. All tasks already on the queue prior to threadpool destruction will be executed.
+     * Any tasks added after destruction results in undefined behavior.
+     * 
+     * @param task The task to be executed by the threadpool. The task should not throw any exceptions.
+     */
     void enqueue(std::function<void()> task);
 
 private:
@@ -59,6 +65,11 @@ private:
      * Condition variable used to signal a new item in the task queue.
      */
     std::condition_variable hasTask;
+
+    /**
+     * True if the threadpool has joined. All tasks already enqueued will finish first before the threadpool is deleted.
+     */
+    bool stopFlag = false;
 };
 
 #endif
