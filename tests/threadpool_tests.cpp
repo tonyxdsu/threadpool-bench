@@ -84,6 +84,18 @@ TEST(ThreadpoolTest, TaskWithFuture) {
     EXPECT_EQ(fut.get(), 42);
 }
 
+TEST(ThreadpoolTest, TasksCanEnqueueTasks) {
+    std::atomic<int> counter{0};
+    {
+        Threadpool pool(2);
+        pool.enqueue([&pool, &counter] {
+            counter++;
+            pool.enqueue([&counter] { counter++; });   // child task
+        });
+    }   // destructor must drain the child, not just the parent
+    EXPECT_EQ(counter.load(), 2);
+}
+
 TEST(ThreadpoolTest, FIFOOrderSingleThread) {
     std::vector<int> order;
     std::mutex m;
@@ -97,4 +109,34 @@ TEST(ThreadpoolTest, FIFOOrderSingleThread) {
         }
     }
     EXPECT_EQ(order, (std::vector<int>{0, 1, 2, 3, 4}));
+}
+
+
+TEST(ThreadpoolTest, WaitAllOnIdlePoolReturnsImmediately) {
+    Threadpool pool;
+    pool.waitAll();
+}
+
+TEST(ThreadpoolTest, WaitAllBlocksUntilTasksFinish) {
+    std::atomic<int> counter{0};
+    Threadpool pool;
+    for (int i = 0; i < 100; i++) {
+        pool.enqueue([&counter] {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            counter++;
+        });
+    }
+    pool.waitAll();
+    EXPECT_EQ(counter.load(), 100);   // asserted while the pool is still alive
+}
+
+TEST(ThreadpoolTest, WaitAllIsReusable) {
+    std::atomic<int> counter{0};
+    Threadpool pool;
+    for (int round = 1; round <= 3; round++) {
+        for (int i = 0; i < 10; i++)
+            pool.enqueue([&counter] { counter++; });
+        pool.waitAll();
+        EXPECT_EQ(counter.load(), 10 * round);
+    }
 }

@@ -1,17 +1,25 @@
 #include "threadpool.hpp"
 
-#include <iostream>
-
 using std::vector;
 using std::thread;
 
-#define DEFAULT_NUM_THREADS 8
+#include <iostream>
 
-Threadpool::Threadpool() : Threadpool(DEFAULT_NUM_THREADS) {
+#define DEFAULT_NUM_THREADS 8
+unsigned int defaultThreadCount() {
+    unsigned int n = std::thread::hardware_concurrency();
+    return n == 0 ? DEFAULT_NUM_THREADS : n;   // hardware_concurrency() may return 0 if it cannot tell
+}
+
+Threadpool::Threadpool() : Threadpool(defaultThreadCount()) {
 
 }
 
 Threadpool::Threadpool(unsigned int numThreads) {
+    if (numThreads == 0) {
+        throw std::invalid_argument("Threadpool: numThreads must be at least 1");
+    }
+
     this->threads.reserve(numThreads);
     this->numThreads = numThreads;
 
@@ -23,9 +31,22 @@ Threadpool::Threadpool(unsigned int numThreads) {
 void Threadpool::enqueue(std::function<void()> task) {
     {
         std::unique_lock<std::mutex> lock(mutexLock);
-        taskQueue.push(task); 
+
+        if (stopFlag) {
+            throw std::runtime_error("Threadpool: enqueue called after destruction began");
+        }
+
+        taskQueue.push(std::move(task));
+        pendingTasks++;
     }
     hasTask.notify_one();
+}
+
+void Threadpool::waitAll() {
+    std::unique_lock<std::mutex> lock(mutexLock);
+    while (pendingTasks != 0) {
+        allDone.wait(lock);
+    }
 }
 
 Threadpool::~Threadpool() {
@@ -60,5 +81,13 @@ void Threadpool::worker() {
         }
 
         task(); 
+        
+        {
+            std::unique_lock<std::mutex> lock(mutexLock);
+            pendingTasks--;
+            if (pendingTasks == 0) {
+                allDone.notify_all();
+            }
+        }
     }
 }
