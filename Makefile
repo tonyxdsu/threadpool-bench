@@ -1,6 +1,6 @@
 # Compiler
 CXX = g++
-CXXFLAGS = -std=c++17 -Wall -Wextra -Iinclude -pthread -g
+CXXFLAGS = -std=c++17 -Wall -Wextra -Iinclude -pthread
 TEST_FLAGS = -lgtest -lgtest_main -pthread
 
 # Directories
