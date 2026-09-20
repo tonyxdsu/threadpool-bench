@@ -32,10 +32,6 @@ void Threadpool::enqueue(std::function<void()> task) {
     {
         std::unique_lock<std::mutex> lock(mutexLock);
 
-        if (stopFlag) {
-            throw std::runtime_error("Threadpool: enqueue called after destruction began");
-        }
-
         taskQueue.push(std::move(task));
         pendingTasks++;
     }

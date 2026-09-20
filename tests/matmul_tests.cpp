@@ -6,6 +6,7 @@
 #include <atomic>
 #include <cmath>
 #include <cstddef>
+#include <stdexcept>
 #include <vector>
 
 namespace {
@@ -325,6 +326,18 @@ TEST(MultiplyNaiveTest, DoesNotModifyInputs) {
     EXPECT_EQ(B.data, bCopy);
 }
 
+TEST(MultiplyNaiveTest, InnerDimensionMismatchThrows) {
+    Matrix A(2, 3), B(4, 2);
+    EXPECT_THROW(multiplyNaive(A, B), std::invalid_argument);
+}
+
+TEST(MultiplyNaiveTest, SwappedOperandsOfNonSquareProductThrow) {
+    // A * B is valid but B * A is not.
+    Matrix A(2, 3), B(3, 5);
+    EXPECT_NO_THROW(multiplyNaive(A, B));
+    EXPECT_THROW(multiplyNaive(B, A), std::invalid_argument);
+}
+
 // ---------------------------------------------------------------------------
 // multiplyBlocked
 // ---------------------------------------------------------------------------
@@ -423,6 +436,16 @@ TEST(MultiplyBlockedTest, DoesNotModifyInputs) {
     multiplyBlocked(A, B, 3);
     EXPECT_EQ(A.data, aCopy);
     EXPECT_EQ(B.data, bCopy);
+}
+
+TEST(MultiplyBlockedTest, InnerDimensionMismatchThrows) {
+    Matrix A(2, 3), B(4, 2);
+    EXPECT_THROW(multiplyBlocked(A, B, 2), std::invalid_argument);
+}
+
+TEST(MultiplyBlockedTest, ZeroBlockSizeThrows) {
+    Matrix A(4, 4), B(4, 4);
+    EXPECT_THROW(multiplyBlocked(A, B, 0), std::invalid_argument);
 }
 
 // ---------------------------------------------------------------------------
@@ -651,4 +674,27 @@ TEST(MultiplyBlockedParallelTest, DoesNotModifyInputs) {
     multiplyBlockedParallel(A, B, 4, pool);
     EXPECT_EQ(A.data, aCopy);
     EXPECT_EQ(B.data, bCopy);
+}
+
+TEST(MultiplyBlockedParallelTest, InnerDimensionMismatchThrows) {
+    Threadpool pool(2);
+    Matrix A(2, 3), B(4, 2);
+    EXPECT_THROW(multiplyBlockedParallel(A, B, 2, pool), std::invalid_argument);
+}
+
+TEST(MultiplyBlockedParallelTest, ZeroBlockSizeThrows) {
+    Threadpool pool(2);
+    Matrix A(4, 4), B(4, 4);
+    EXPECT_THROW(multiplyBlockedParallel(A, B, 0, pool), std::invalid_argument);
+}
+
+TEST(MultiplyBlockedParallelTest, PoolStillUsableAfterThrow) {
+    // Validation must happen on the calling thread before anything is enqueued,
+    // so a rejected call leaves the pool in a clean state.
+    Threadpool pool(2);
+    Matrix bad(2, 3), B(4, 2);
+    EXPECT_THROW(multiplyBlockedParallel(bad, B, 2, pool), std::invalid_argument);
+
+    Matrix A = randomMatrix(6, 4, 94);
+    expectMatricesNear(multiplyBlockedParallel(A, B, 2, pool), referenceMultiply(A, B));
 }

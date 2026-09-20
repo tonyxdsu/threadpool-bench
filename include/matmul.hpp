@@ -48,6 +48,7 @@ struct Matrix {
  *
  * @param A Left operand, M x K.
  * @param B Right operand, K x N.
+ * @throws std::invalid_argument if dimensions do not match.
  * @return The M x N product.
  */
 Matrix multiplyNaive(const Matrix& A, const Matrix& B);

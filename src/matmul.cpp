@@ -3,8 +3,26 @@
 #include <random>
 
 Matrix multiplyNaive(const Matrix& A, const Matrix& B) {
-    // TODO: classic i-j-k triple loop over A.rows x B.cols, accumulating over A.cols.
+    if (A.cols != B.rows) {
+        throw std::invalid_argument("Matrix dimensions do not match for multiplication");
+    }
+
     Matrix C(A.rows, B.cols);
+
+    // We'll say A is i rows by k columns,
+    //           B is k rows by j columns
+    // and       C is i rows by j columns
+
+    for (size_t i = 0; i < A.rows; i++) {
+        for (size_t j = 0; j < B.cols; j++) {
+            double sum = 0;
+            for (size_t k = 0; k < A.cols; k++) {
+                sum += A.at(i, k) * B.at(k, j);
+            }
+            C.at(i, j) = sum;
+        }
+    }
+
     return C;
 }
 
@@ -31,14 +49,12 @@ void multiplyBlock(const Matrix& A, const Matrix& B, Matrix& C,
 }
 
 Matrix randomMatrix(std::size_t rows, std::size_t cols, unsigned int seed) {
-    // TODO: fill with std::mt19937 + std::uniform_real_distribution seeded by seed.
-
     std::mt19937 gen(seed);
     std::uniform_real_distribution<> dis(-1000.0, 1000.0);
 
     Matrix m(rows, cols);
 
-    for (int i = 0; i < rows * cols; i++) {
+    for (size_t i = 0; i < rows * cols; i++) {
         m.data[i] = dis(gen);
     }
 
@@ -46,11 +62,11 @@ Matrix randomMatrix(std::size_t rows, std::size_t cols, unsigned int seed) {
 }
 
 bool matricesEqual(const Matrix& a, const Matrix& b, double tolerance) {
-    if (a.data.size() != b.data.size()) {
+    if (a.rows != b.rows || a.cols != b.cols) {
         return false;
     }
 
-    for (int i = 0; i < a.data.size(); i++) {
+    for (size_t i = 0; i < a.data.size(); i++) {
         if (std::fabs(a.data[i] - b.data[i]) > tolerance) {
             return false;
         }
