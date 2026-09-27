@@ -12,8 +12,10 @@
 namespace {
 
 // Tolerance for comparing results of the same product computed with different
-// summation orders. Random inputs are O(1) and K is small in these tests.
-constexpr double kTol = 1e-9;
+// summation orders. randomMatrix draws from [-1000, 1000], so products are up to 1e6
+// and sums reach ~1e7, where one double ulp is ~1e-9. 1e-6 allows a few hundred ulps
+// of reordering error while still catching any real indexing bug.
+constexpr double kTol = 1e-6;
 
 // Independent reference so the blocked/parallel tests do not depend on multiplyNaive
 // being correct. Deliberately the dumbest possible implementation.
@@ -61,6 +63,16 @@ void expectMatricesNear(const Matrix& actual, const Matrix& expected, double tol
             EXPECT_NEAR(actual.at(r, c), expected.at(r, c), tol)
                 << "mismatch at (" << r << ", " << c << ")";
 }
+
+// void expectMatricesNear(const Matrix& actual, const Matrix& expected, double tol = kTol) {
+//     ASSERT_EQ(actual.rows, expected.rows);
+//     ASSERT_EQ(actual.cols, expected.cols);
+//     ASSERT_EQ(actual.data.size(), expected.data.size());
+//     for (std::size_t r = 0; r < actual.rows; r++)
+//         for (std::size_t c = 0; c < actual.cols; c++)
+//             EXPECT_NEAR(actual.at(r, c), expected.at(r, c), tol)
+//                 << "mismatch at (" << r << ", " << c << ")";
+// }
 
 }  // namespace
 
@@ -349,13 +361,33 @@ TEST(MultiplyBlockedTest, OutputHasMxNShape) {
     EXPECT_EQ(C.cols, 2u);
 }
 
-TEST(MultiplyBlockedTest, KnownTwoByTwo) {
+TEST(MultiplyBlockedTest, KnownTwoByTwoBlockSizeOne) {
     Matrix A = fromList(2, 2, {1, 2, 3, 4});
     Matrix B = fromList(2, 2, {5, 6, 7, 8});
     Matrix expected = fromList(2, 2, {19, 22, 43, 50});
     expectMatricesNear(multiplyBlocked(A, B, 1), expected, 0.0);
+}
+
+TEST(MultiplyBlockedTest, KnownTwoByTwoBlockSizeEqualToDimension) {
+    Matrix A = fromList(2, 2, {1, 2, 3, 4});
+    Matrix B = fromList(2, 2, {5, 6, 7, 8});
+    Matrix expected = fromList(2, 2, {19, 22, 43, 50});
     expectMatricesNear(multiplyBlocked(A, B, 2), expected, 0.0);
+}
+
+TEST(MultiplyBlockedTest, KnownTwoByTwoBlockSizeLargerThanDimension) {
+    Matrix A = fromList(2, 2, {1, 2, 3, 4});
+    Matrix B = fromList(2, 2, {5, 6, 7, 8});
+    Matrix expected = fromList(2, 2, {19, 22, 43, 50});
     expectMatricesNear(multiplyBlocked(A, B, 8), expected, 0.0);
+}
+
+TEST(MultiplyBlockedTest, KnownThreeByThreeBlockSizeTwo) {
+    // 3 is not a multiple of 2, so every dimension has a 1-wide tail tile.
+    Matrix A = fromList(3, 3, {1, 2, 3, 4, 5, 6, 7, 8, 9});
+    Matrix B = fromList(3, 3, {9, 8, 7, 6, 5, 4, 3, 2, 1});
+    Matrix expected = fromList(3, 3, {30, 24, 18, 84, 69, 54, 138, 114, 90});
+    expectMatricesNear(multiplyBlocked(A, B, 2), expected, 0.0);
 }
 
 TEST(MultiplyBlockedTest, DimensionsAreMultiplesOfBlockSize) {

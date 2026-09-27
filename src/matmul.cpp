@@ -1,5 +1,6 @@
 #include "matmul.hpp"
 
+#include <algorithm>
 #include <random>
 
 Matrix multiplyNaive(const Matrix& A, const Matrix& B) {
@@ -9,9 +10,9 @@ Matrix multiplyNaive(const Matrix& A, const Matrix& B) {
 
     Matrix C(A.rows, B.cols);
 
-    // We'll say A is i rows by k columns,
-    //           B is k rows by j columns
-    // and       C is i rows by j columns
+    // A is i rows by k columns,
+    // B is k rows by j columns
+    // C is i rows by j columns
 
     for (size_t i = 0; i < A.rows; i++) {
         for (size_t j = 0; j < B.cols; j++) {
@@ -27,10 +28,72 @@ Matrix multiplyNaive(const Matrix& A, const Matrix& B) {
 }
 
 Matrix multiplyBlocked(const Matrix& A, const Matrix& B, std::size_t blockSize) {
-    // TODO: walk output tiles (ii, jj) and k-blocks (kk), then run the inner triple loop
-    // over each tile. Remember the tail tiles when a dimension is not a multiple of blockSize.
+    if (A.cols != B.rows) {
+        throw std::invalid_argument("Matrix dimensions do not match for multiplication");
+    }
+
+    if (blockSize == 0) {
+        throw std::invalid_argument("Block size must be greater than zero");
+    }
+
     Matrix C(A.rows, B.cols);
+
+    size_t numBlocksHorizontal = C.cols / blockSize;
+    if (C.cols % blockSize != 0) {
+        numBlocksHorizontal += 1;
+    }
+
+    size_t numBlocksVertical = C.rows / blockSize;
+    if (C.rows % blockSize != 0) {
+        numBlocksVertical += 1;
+    }
+
+    printf("numBlocks: %zu\n", numBlocksHorizontal);
+
+    for (size_t i = 0; i < numBlocksVertical; i++) {
+        for (size_t j = 0; j < numBlocksHorizontal; j++) {
+            size_t rowStart = i * blockSize;
+            size_t colStart = j * blockSize;
+            size_t rowEnd   = std::min(rowStart + blockSize, C.rows);
+            size_t colEnd   = std::min(colStart + blockSize, C.cols);
+
+            printf("multiplyBlock: rowStart: %zu, rowEnd: %zu, colStart: %zu, colEnd: %zu\n", rowStart, rowEnd, colStart, colEnd);
+
+            multiplyBlock(A, B, C, rowStart, rowEnd, colStart, colEnd, blockSize);
+        }
+    }
+
     return C;
+}
+
+// rowStart, rowEnd, colStart, colEnd are inclusive
+void multiplyBlock(const Matrix& A, const Matrix& B, Matrix& C,
+                   std::size_t rowStart, std::size_t rowEnd,
+                   std::size_t colStart, std::size_t colEnd,
+                   std::size_t blockSize) {
+
+    size_t numBlocksInner = A.cols / blockSize;
+    if (A.cols % blockSize != 0) {
+        numBlocksInner += 1;
+    }
+    
+    for (size_t i = rowStart; i < rowEnd; i++) {
+        for (size_t j = colStart; j < colEnd; j++) {
+            double sum = 0;
+            for (size_t b = 0; b < numBlocksInner; b++) {
+                for (size_t k = 0; k < blockSize; k++) {
+                    size_t AColBRow = b * blockSize + k;
+                    if (AColBRow >= A.cols) {
+                        // TODO this is bad but slightly less bad to assume 
+                        // if statements are rarely taken for branch predictor?
+                        break;
+                    }
+                    sum += A.at(i, AColBRow) * B.at(AColBRow, j);
+                }
+            }
+            C.at(i, j) = sum;
+        }
+    }
 }
 
 Matrix multiplyBlockedParallel(const Matrix& A, const Matrix& B, std::size_t blockSize, Threadpool& pool) {
@@ -40,13 +103,7 @@ Matrix multiplyBlockedParallel(const Matrix& A, const Matrix& B, std::size_t blo
     return C;
 }
 
-void multiplyBlock(const Matrix& A, const Matrix& B, Matrix& C,
-                   std::size_t rowStart, std::size_t rowEnd,
-                   std::size_t colStart, std::size_t colEnd,
-                   std::size_t blockSize) {
-    // TODO: accumulate C[rowStart..rowEnd) x [colStart..colEnd) over all of A.cols,
-    // blocking the K loop by blockSize.
-}
+
 
 Matrix randomMatrix(std::size_t rows, std::size_t cols, unsigned int seed) {
     std::mt19937 gen(seed);
