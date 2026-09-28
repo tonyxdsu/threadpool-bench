@@ -48,16 +48,12 @@ Matrix multiplyBlocked(const Matrix& A, const Matrix& B, std::size_t blockSize) 
         numBlocksVertical += 1;
     }
 
-    printf("numBlocks: %zu\n", numBlocksHorizontal);
-
     for (size_t i = 0; i < numBlocksVertical; i++) {
         for (size_t j = 0; j < numBlocksHorizontal; j++) {
             size_t rowStart = i * blockSize;
             size_t colStart = j * blockSize;
             size_t rowEnd   = std::min(rowStart + blockSize, C.rows);
             size_t colEnd   = std::min(colStart + blockSize, C.cols);
-
-            printf("multiplyBlock: rowStart: %zu, rowEnd: %zu, colStart: %zu, colEnd: %zu\n", rowStart, rowEnd, colStart, colEnd);
 
             multiplyBlock(A, B, C, rowStart, rowEnd, colStart, colEnd, blockSize);
         }
@@ -77,10 +73,10 @@ void multiplyBlock(const Matrix& A, const Matrix& B, Matrix& C,
         numBlocksInner += 1;
     }
     
-    for (size_t i = rowStart; i < rowEnd; i++) {
-        for (size_t j = colStart; j < colEnd; j++) {
-            double sum = 0;
-            for (size_t b = 0; b < numBlocksInner; b++) {
+    for (size_t b = 0; b < numBlocksInner; b++) {
+        for (size_t i = rowStart; i < rowEnd; i++) {
+            for (size_t j = colStart; j < colEnd; j++) {
+                double sum = 0;
                 for (size_t k = 0; k < blockSize; k++) {
                     size_t AColBRow = b * blockSize + k;
                     if (AColBRow >= A.cols) {
@@ -90,8 +86,8 @@ void multiplyBlock(const Matrix& A, const Matrix& B, Matrix& C,
                     }
                     sum += A.at(i, AColBRow) * B.at(AColBRow, j);
                 }
+                C.at(i, j) += sum;
             }
-            C.at(i, j) = sum;
         }
     }
 }

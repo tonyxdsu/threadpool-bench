@@ -1,6 +1,10 @@
 # Compiler
 CXX = g++
-CXXFLAGS = -std=c++17 -Wall -Wextra -Iinclude -pthread
+# -O3 -march=native: full optimization plus every instruction set this CPU supports
+# (AVX2/AVX-512, FMA). The binary may not run on other machines.
+# -g keeps debug symbols for gdb/perf; it does not slow the code down.
+OPTFLAGS = -O3 -march=native -g
+CXXFLAGS = -std=c++17 -Wall -Wextra -Iinclude -pthread $(OPTFLAGS)
 TEST_FLAGS = -lgtest -lgtest_main -pthread
 
 # Directories

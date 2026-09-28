@@ -78,13 +78,16 @@ Matrix multiplyBlocked(const Matrix& A, const Matrix& B, std::size_t blockSize);
 Matrix multiplyBlockedParallel(const Matrix& A, const Matrix& B, std::size_t blockSize, Threadpool& pool);
 
 /**
- * Computes one output tile of C: rows [rowStart, rowEnd) by columns [colStart, colEnd).
- * Accumulates over the full K dimension internally, so the tile is complete when this
- * returns and the call is self-contained enough to hand straight to Threadpool::enqueue.
+ * Adds the product A * B into one output tile of C: rows [rowStart, rowEnd) by columns
+ * [colStart, colEnd), i.e. C_tile += (A * B)_tile. Like BLAS gemm with beta = 1, the
+ * tile's existing contents are kept and added to, so the caller must zero the tile first
+ * to get the plain product. The full K dimension is accumulated within a single call, so
+ * the tile is complete when this returns and the call is self-contained enough to hand
+ * straight to Threadpool::enqueue.
  *
  * @param A Left operand, M x K.
  * @param B Right operand, K x N.
- * @param C Output matrix, M x N. Only the named tile is written.
+ * @param C Output matrix, M x N. Only the named tile is read or written.
  * @param rowStart First row of the tile, inclusive.
  * @param rowEnd One past the last row of the tile.
  * @param colStart First column of the tile, inclusive.

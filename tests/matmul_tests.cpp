@@ -500,15 +500,31 @@ TEST(MultiplyBlockTest, WritesOnlyNamedTile) {
 
     multiplyBlock(A, B, C, 2, 5, 3, 7, 4);   // rows [2,5), cols [3,7)
 
+    // multiplyBlock accumulates, so the tile holds sentinel + product; everything
+    // outside the tile must be untouched.
     Matrix expected = referenceMultiply(A, B);
     for (std::size_t r = 0; r < 8; r++)
         for (std::size_t c = 0; c < 8; c++) {
             bool inTile = (r >= 2 && r < 5) && (c >= 3 && c < 7);
             if (inTile)
-                EXPECT_NEAR(C.at(r, c), expected.at(r, c), kTol) << "(" << r << ", " << c << ")";
+                EXPECT_NEAR(C.at(r, c), sentinel + expected.at(r, c), kTol)
+                    << "(" << r << ", " << c << ")";
             else
                 EXPECT_EQ(C.at(r, c), sentinel) << "clobbered (" << r << ", " << c << ")";
         }
+}
+
+TEST(MultiplyBlockTest, AccumulatesIntoExistingTile) {
+    // Two calls on the same tile add up to twice the product.
+    Matrix A = randomMatrix(6, 7, 35);
+    Matrix B = randomMatrix(7, 5, 36);
+    Matrix C(6, 5);
+    multiplyBlock(A, B, C, 0, 6, 0, 5, 3);
+    multiplyBlock(A, B, C, 0, 6, 0, 5, 3);
+
+    Matrix expected = referenceMultiply(A, B);
+    for (double& x : expected.data) x *= 2;
+    expectMatricesNear(C, expected);
 }
 
 TEST(MultiplyBlockTest, TileIsCompleteAfterReturn) {
