@@ -93,13 +93,41 @@ void multiplyBlock(const Matrix& A, const Matrix& B, Matrix& C,
 }
 
 Matrix multiplyBlockedParallel(const Matrix& A, const Matrix& B, std::size_t blockSize, Threadpool& pool) {
-    // TODO: partition C into disjoint tiles, enqueue one multiplyBlock call per tile, then
-    // block here until every tile has finished before returning C.
+    if (A.cols != B.rows) {
+        throw std::invalid_argument("Matrix dimensions do not match for multiplication");
+    }
+
+    if (blockSize == 0) {
+        throw std::invalid_argument("Block size must be greater than zero");
+    }
+
     Matrix C(A.rows, B.cols);
+
+    size_t numBlocksHorizontal = C.cols / blockSize;
+    if (C.cols % blockSize != 0) {
+        numBlocksHorizontal += 1;
+    }
+
+    size_t numBlocksVertical = C.rows / blockSize;
+    if (C.rows % blockSize != 0) {
+        numBlocksVertical += 1;
+    }
+
+    for (size_t i = 0; i < numBlocksVertical; i++) {
+        for (size_t j = 0; j < numBlocksHorizontal; j++) {
+            size_t rowStart = i * blockSize;
+            size_t colStart = j * blockSize;
+            size_t rowEnd   = std::min(rowStart + blockSize, C.rows);
+            size_t colEnd   = std::min(colStart + blockSize, C.cols);
+            pool.enqueue([&A, &B, &C, rowStart, rowEnd, colStart, colEnd, blockSize] {
+                multiplyBlock(A, B, C, rowStart, rowEnd, colStart, colEnd, blockSize);
+            });
+        }
+    }
+
+    pool.waitAll();
     return C;
 }
-
-
 
 Matrix randomMatrix(std::size_t rows, std::size_t cols, unsigned int seed) {
     std::mt19937 gen(seed);
