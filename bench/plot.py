@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
-"""Charts and a summary table from a results file written by `make bench-run`.
+"""Charts and a summary from a results file written by `make bench-run`.
 
     python3 bench/plot.py bench/results/<label>.json [--out bench/plots]
 
-Each chart is written twice, <name>-light.png and <name>-dark.png, so a README can follow the
-reader's theme with a <picture> element (see bench/README.md). summary.md holds the numbers
-behind every chart as Markdown tables.
+Each chart is written as <name>.png on a dark background. summary.md shows every chart above
+the numbers behind it, as Markdown tables.
 """
 
 import argparse
@@ -23,17 +22,10 @@ from matplotlib.lines import Line2D  # noqa: E402
 from matplotlib.ticker import FixedLocator, FuncFormatter, NullLocator  # noqa: E402
 
 # Each implementation keeps its color in every chart. OpenBLAS is context, so it is gray.
-THEMES = {
-    "light": {
-        "surface": "#fcfcfb", "ink": "#0b0b0b", "ink2": "#52514e", "muted": "#898781",
-        "grid": "#e1e0d9", "axis": "#c3c2b7",
-        "naive": "#2a78d6", "blocked": "#eb6834", "openblas": "#898781",
-    },
-    "dark": {
-        "surface": "#1a1a19", "ink": "#ffffff", "ink2": "#c3c2b7", "muted": "#898781",
-        "grid": "#2c2c2a", "axis": "#383835",
-        "naive": "#3987e5", "blocked": "#d95926", "openblas": "#898781",
-    },
+THEME = {
+    "surface": "#1a1a19", "ink": "#ffffff", "ink2": "#c3c2b7", "muted": "#898781",
+    "grid": "#2c2c2a", "axis": "#383835",
+    "naive": "#3987e5", "blocked": "#d95926", "openblas": "#898781",
 }
 
 TIME_UNITS = {"ns": 1e-9, "us": 1e-6, "ms": 1e-3, "s": 1.0}
@@ -460,12 +452,20 @@ def chart_headline(results, theme):
 # ---------------------------------------------------------------------------------------------
 
 def table(header, rows):
-    lines = ["| " + " | ".join(header) + " |", "|" + "|".join("---:" if i else "---" for i in range(len(header))) + "|"]
-    lines += ["| " + " | ".join(str(cell) for cell in row) + " |" for row in rows]
+    """A Markdown table, leaving out columns with no data in any row, such as the OpenBLAS
+    columns of a run filtered to the blocked benchmarks."""
+    keep = [i for i in range(len(header)) if any(str(row[i]) != "-" for row in rows)]
+    lines = ["| " + " | ".join(header[i] for i in keep) + " |", "|" + "|".join("---:" if i else "---" for i in keep) + "|"]
+    lines += ["| " + " | ".join(str(row[i]) for i in keep) + " |" for row in rows]
     return "\n".join(lines)
 
 
-def summary(results, label):
+def images(charts, *names_and_alts):
+    """Markdown for the charts among (name, alt text) pairs that were written."""
+    return [line for name, alt in names_and_alts if name in charts for line in (f"![{alt}]({name}.png)", "")]
+
+
+def summary(results, label, charts):
     ctx = results.context
     n, bs, cores = results.fixed_n, results.block_size, results.cores
     caches = ", ".join(f"L{c['level']} {fmt_bytes(c['size'])}" for c in ctx.get("caches", [])
@@ -474,7 +474,7 @@ def summary(results, label):
     out = [f"# Benchmark results: {label}", ""]
     out.append("- Machine: " + ", ".join(part for part in machine if part))
     out.append(f"- Build: {ctx.get('compiler', '?')}, `{ctx.get('cxxflags', '?')}`, git {ctx.get('git', '?')}")
-    if "openblas" in ctx:
+    if "openblas" in ctx and any(family == "BM_OpenBLAS" for family, _ in results.points):
         out.append(f"- Reference: {ctx['openblas']}")
     out.append(f"- Run: {ctx.get('date', '')}, median of {results.repetitions()} repetitions, "
                f"wall-clock time, every result checked with Freivalds' algorithm")
@@ -491,8 +491,11 @@ def summary(results, label):
             f"{same_openblas['seconds'] / point['seconds']:.1%}" if same_openblas else "-",
             f"{point['cv']:.1%}" if point["cv"] is not None else "-",
         ])
-    out += ["", f"## Headline: n = {n}, tile {bs}", "",
-            table(["Implementation", "Threads", "Time (ms)", "GFLOP/s", "vs naive", "vs OpenBLAS, same threads", "CV"], rows)]
+    if rows:
+        out += ["", f"## Headline: n = {n}, tile {bs}", ""]
+        out += images(charts, ("headline", f"GFLOP/s of each implementation at n = {n}"))
+        out.append(table(["Implementation", "Threads", "Time (ms)", "GFLOP/s", "vs naive",
+                          "vs OpenBLAS, same threads", "CV"], rows))
 
     naive_s = dict(results.series("BM_Naive", "n"))
     blocked_s = dict(results.series("BM_Blocked", "n", bs=bs))
@@ -507,10 +510,13 @@ def summary(results, label):
             fmt_num(a and a.get("L2_miss/FMA")), fmt_num(b and b.get("L2_miss/FMA")),
             fmt_num(a and a.get("DRAM_fill/FMA")), fmt_num(b and b.get("DRAM_fill/FMA")),
         ])
-    out += ["", "## Naive vs blocked by size, one thread", "",
-            "GFLOP/s, then hardware-counter events per multiply-add (naive / blocked).", "",
-            table(["n", "Naive", "Blocked", "Blocked / naive", "OpenBLAS", "L1D miss N", "L1D miss B",
-                   "L2 miss N", "L2 miss B", "DRAM fill N", "DRAM fill B"], rows)]
+    if rows:
+        out += ["", "## By matrix size, one thread", ""]
+        out += images(charts, ("throughput_vs_size", "GFLOP/s of naive and blocked by matrix size"),
+                      ("cache_misses", "Cache misses per multiply-add by matrix size"))
+        out += ["GFLOP/s, then hardware-counter events per multiply-add (N = naive, B = blocked).", "",
+                table(["n", "Naive", "Blocked", "Blocked / naive", "OpenBLAS", "L1D miss N", "L1D miss B",
+                       "L2 miss N", "L2 miss B", "DRAM fill N", "DRAM fill B"], rows)]
 
     serial = results.get("BM_Blocked", n=n, bs=bs)
     openblas_1 = results.get("BM_OpenBLAS", n=n, workers=1)
@@ -526,11 +532,13 @@ def summary(results, label):
             f"{gflops(n, o):.3g}" if o else "-",
             fmt_num(openblas_1["seconds"] / o["seconds"]) if o and openblas_1 else "-",
         ])
-    out += ["", f"## Thread scaling: n = {n}, tile {bs}", "",
-            f"Speedup is against single-threaded multiplyBlocked; efficiency divides it by the physical cores "
-            f"in use (at most {cores}). GHz is the average clock of the busy cores; IPC is per hardware thread.", "",
-            table(["Workers", "Time (ms)", "GFLOP/s", "Speedup", "Efficiency", "GHz", "IPC", "L1D miss/FMA",
-                   "OpenBLAS GFLOP/s", "OpenBLAS speedup"], rows)]
+    if rows:
+        out += ["", f"## Thread scaling: n = {n}, tile {bs}", ""]
+        out += images(charts, ("thread_scaling", f"Speedup by number of workers at n = {n}"))
+        out += [f"Speedup is against single-threaded multiplyBlocked; efficiency divides it by the physical cores "
+                f"in use (at most {cores}). GHz is the average clock of the busy cores; IPC is per hardware thread.", "",
+                table(["Workers", "Time (ms)", "GFLOP/s", "Speedup", "Efficiency", "GHz", "IPC", "L1D miss/FMA",
+                       "OpenBLAS GFLOP/s", "OpenBLAS speedup"], rows)]
 
     workers = results.tile_sweep_workers()
     parallel_t = dict(results.series("BM_BlockedParallel", "bs", n=n, workers=workers)) if workers else {}
@@ -540,9 +548,10 @@ def summary(results, label):
         rows.append([tile, f"{gflops(n, p):.3g}", fmt_num(p.get("IPC")), fmt_num(p.get("L1D_miss/FMA")),
                      fmt_num(p.get("L2_miss/FMA")), f"{gflops(n, q):.3g}" if q else "-"])
     if rows:
-        out += ["", f"## Tile sweep: n = {n}", "",
-                table(["Tile", "1 thread GFLOP/s", "IPC", "L1D miss/FMA", "L2 miss/FMA",
-                       f"{workers} workers GFLOP/s"], rows)]
+        out += ["", f"## Tile sweep: n = {n}", ""]
+        out += images(charts, ("tile_sweep", f"GFLOP/s by tile size at n = {n}"))
+        out.append(table(["Tile", "1 thread GFLOP/s", "IPC", "L1D miss/FMA", "L2 miss/FMA",
+                          f"{workers} workers GFLOP/s"], rows))
     return "\n".join(out) + "\n"
 
 
@@ -557,18 +566,20 @@ def main():
     out.mkdir(parents=True, exist_ok=True)
     charts = {"headline": chart_headline, "throughput_vs_size": chart_throughput,
               "cache_misses": chart_cache, "thread_scaling": chart_scaling, "tile_sweep": chart_tiles}
+    written = set()
     for name, make in charts.items():
-        for mode, theme in THEMES.items():
-            fig = make(results, theme)
-            if fig is None:
-                print(f"skipped {name}: no data for it in {args.results}")
-                break
-            path = out / f"{name}-{mode}.png"
-            fig.savefig(path, facecolor=theme["surface"])
-            plt.close(fig)
-            print(f"wrote {path}")
+        path = out / f"{name}.png"
+        fig = make(results, THEME)
+        if fig is None:
+            path.unlink(missing_ok=True)   # so the folder never mixes in a chart from an older run
+            print(f"skipped {name}: no data for it in {args.results}")
+            continue
+        fig.savefig(path, facecolor=THEME["surface"])
+        plt.close(fig)
+        written.add(name)
+        print(f"wrote {path}")
     label = Path(args.results).stem
-    (out / "summary.md").write_text(summary(results, label))
+    (out / "summary.md").write_text(summary(results, label, written))
     print(f"wrote {out / 'summary.md'}")
     for failure in results.failed:
         print(f"FAILED correctness check: {failure}")

@@ -167,19 +167,16 @@ python3 /usr/share/benchmark/compare.py benchmarks ../threadpool-base/build/benc
 Benchmarks are matched by name, and the name includes the tile size (`bs:48`). Compare at the
 same tile size first, then re-run the tile sweep for the new kernel.
 
-## Charts in a README
+## Charts
 
-`make bench-plot` writes a light and a dark version of each chart. A `<picture>` element shows
-the one that matches the reader's GitHub theme:
+`make bench-plot` writes each chart as `<name>.png` on a dark background, and
+`bench/plots/summary.md` shows every chart above the numbers behind it as Markdown tables. A
+chart that needs a benchmark the run did not include (for example `BM_Naive`, when filtered out)
+is skipped, and so are table columns with no data. To show a chart in a README:
 
-```html
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="bench/plots/headline-dark.png">
-  <img alt="GFLOP/s of each implementation at n = 2000" src="bench/plots/headline-light.png">
-</picture>
+```markdown
+![GFLOP/s of each implementation at n = 2000](bench/plots/headline.png)
 ```
-
-`bench/plots/summary.md` has the numbers behind every chart as Markdown tables.
 
 ## Files
 
