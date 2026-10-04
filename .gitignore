@@ -18,6 +18,3 @@ bin/
 # Markdown (except READMEs)
 *.md
 !README.md
-
-# PDFs
-*.pdf
