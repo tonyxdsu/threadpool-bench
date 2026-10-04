@@ -14,3 +14,10 @@ bin/
 .vscode/
 .idea/
 
+
+# Markdown (except READMEs)
+*.md
+!README.md
+
+# PDFs
+*.pdf

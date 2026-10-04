@@ -64,16 +64,6 @@ void expectMatricesNear(const Matrix& actual, const Matrix& expected, double tol
                 << "mismatch at (" << r << ", " << c << ")";
 }
 
-// void expectMatricesNear(const Matrix& actual, const Matrix& expected, double tol = kTol) {
-//     ASSERT_EQ(actual.rows, expected.rows);
-//     ASSERT_EQ(actual.cols, expected.cols);
-//     ASSERT_EQ(actual.data.size(), expected.data.size());
-//     for (std::size_t r = 0; r < actual.rows; r++)
-//         for (std::size_t c = 0; c < actual.cols; c++)
-//             EXPECT_NEAR(actual.at(r, c), expected.at(r, c), tol)
-//                 << "mismatch at (" << r << ", " << c << ")";
-// }
-
 }  // namespace
 
 // ---------------------------------------------------------------------------
