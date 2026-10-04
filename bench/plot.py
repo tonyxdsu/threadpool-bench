@@ -1,15 +1,18 @@
 #!/usr/bin/env python3
 """Charts and a summary from a results file written by `make bench-run`.
 
-    python3 bench/plot.py bench/results/<label>.json [--out bench/plots]
+    python3 bench/plot.py bench/results/<label>.json [--out bench/plots] [--readme README.md]
 
 Each chart is written as <name>.png on a dark background. summary.md shows every chart above
-the numbers behind it, as Markdown tables.
+the numbers behind it, as Markdown tables. With --readme, the same summary also replaces
+whatever is between the <!-- results:start --> and <!-- results:end --> lines of that README.
 """
 
 import argparse
 import json
 import math
+import os
+import posixpath
 import re
 import statistics
 from pathlib import Path
@@ -460,19 +463,37 @@ def table(header, rows):
     return "\n".join(lines)
 
 
-def images(charts, *names_and_alts):
+def images(charts, image_dir, *names_and_alts):
     """Markdown for the charts among (name, alt text) pairs that were written."""
-    return [line for name, alt in names_and_alts if name in charts for line in (f"![{alt}]({name}.png)", "")]
+    return [line for name, alt in names_and_alts if name in charts
+            for line in (f"![{alt}]({posixpath.join(image_dir, name + '.png')})", "")]
 
 
-def summary(results, label, charts):
+def cache_summary(results):
+    """The data caches with the scope of each size, e.g. "L1d 48 KiB and L2 1 MiB per core, L3
+    96 MiB shared by all 8 cores". Google Benchmark lists one instance of each cache and how many
+    hardware threads share it."""
+    groups = {}
+    for c in results.context.get("caches", []):
+        if c["type"] not in ("Data", "Unified"):
+            continue
+        sharing = (c.get("num_sharing") or 0) // results.threads_per_core   # cores per instance
+        scope = ("" if sharing < 1 else "per core" if sharing == 1
+                 else f"shared by all {sharing} cores" if sharing >= results.cores else f"per {sharing} cores")
+        name = f"L{c['level']}d" if c["type"] == "Data" else f"L{c['level']}"
+        groups.setdefault(scope, []).append(f"{name} {fmt_bytes(c['size'])}")
+    return ", ".join(f"{' and '.join(sizes)} {scope}".strip() for scope, sizes in groups.items())
+
+
+def summary(results, label, charts, image_dir="", level=1):
+    """The summary as Markdown. image_dir is the charts' folder relative to the file the summary
+    goes in, and level is the heading level of its title."""
     ctx = results.context
     n, bs, cores = results.fixed_n, results.block_size, results.cores
-    caches = ", ".join(f"L{c['level']} {fmt_bytes(c['size'])}" for c in ctx.get("caches", [])
-                       if c["type"] in ("Data", "Unified"))
-    machine = [ctx.get("cpu"), f"{ctx.get('num_cpus')} hardware threads", caches]
-    out = [f"# Benchmark results: {label}", ""]
-    out.append("- Machine: " + ", ".join(part for part in machine if part))
+    h1, h2 = "#" * level, "#" * (level + 1)
+    machine = [ctx.get("cpu"), f"{cores} cores, {ctx.get('num_cpus')} hardware threads", cache_summary(results)]
+    out = [f"{h1} Benchmark results: {label}", ""]
+    out.append("- Machine: " + "; ".join(part for part in machine if part))
     out.append(f"- Build: {ctx.get('compiler', '?')}, `{ctx.get('cxxflags', '?')}`, git {ctx.get('git', '?')}")
     if "openblas" in ctx and any(family == "BM_OpenBLAS" for family, _ in results.points):
         out.append(f"- Reference: {ctx['openblas']}")
@@ -492,8 +513,8 @@ def summary(results, label, charts):
             f"{point['cv']:.1%}" if point["cv"] is not None else "-",
         ])
     if rows:
-        out += ["", f"## Headline: n = {n}, tile {bs}", ""]
-        out += images(charts, ("headline", f"GFLOP/s of each implementation at n = {n}"))
+        out += ["", f"{h2} Headline: n = {n}, tile {bs}", ""]
+        out += images(charts, image_dir, ("headline", f"GFLOP/s of each implementation at n = {n}"))
         out.append(table(["Implementation", "Threads", "Time (ms)", "GFLOP/s", "vs naive",
                           "vs OpenBLAS, same threads", "CV"], rows))
 
@@ -511,8 +532,8 @@ def summary(results, label, charts):
             fmt_num(a and a.get("DRAM_fill/FMA")), fmt_num(b and b.get("DRAM_fill/FMA")),
         ])
     if rows:
-        out += ["", "## By matrix size, one thread", ""]
-        out += images(charts, ("throughput_vs_size", "GFLOP/s of naive and blocked by matrix size"),
+        out += ["", f"{h2} By matrix size, one thread", ""]
+        out += images(charts, image_dir, ("throughput_vs_size", "GFLOP/s of naive and blocked by matrix size"),
                       ("cache_misses", "Cache misses per multiply-add by matrix size"))
         out += ["GFLOP/s, then hardware-counter events per multiply-add (N = naive, B = blocked).", "",
                 table(["n", "Naive", "Blocked", "Blocked / naive", "OpenBLAS", "L1D miss N", "L1D miss B",
@@ -533,8 +554,8 @@ def summary(results, label, charts):
             fmt_num(openblas_1["seconds"] / o["seconds"]) if o and openblas_1 else "-",
         ])
     if rows:
-        out += ["", f"## Thread scaling: n = {n}, tile {bs}", ""]
-        out += images(charts, ("thread_scaling", f"Speedup by number of workers at n = {n}"))
+        out += ["", f"{h2} Thread scaling: n = {n}, tile {bs}", ""]
+        out += images(charts, image_dir, ("thread_scaling", f"Speedup by number of workers at n = {n}"))
         out += [f"Speedup is against single-threaded multiplyBlocked; efficiency divides it by the physical cores "
                 f"in use (at most {cores}). GHz is the average clock of the busy cores; IPC is per hardware thread.", "",
                 table(["Workers", "Time (ms)", "GFLOP/s", "Speedup", "Efficiency", "GHz", "IPC", "L1D miss/FMA",
@@ -548,17 +569,38 @@ def summary(results, label, charts):
         rows.append([tile, f"{gflops(n, p):.3g}", fmt_num(p.get("IPC")), fmt_num(p.get("L1D_miss/FMA")),
                      fmt_num(p.get("L2_miss/FMA")), f"{gflops(n, q):.3g}" if q else "-"])
     if rows:
-        out += ["", f"## Tile sweep: n = {n}", ""]
-        out += images(charts, ("tile_sweep", f"GFLOP/s by tile size at n = {n}"))
+        out += ["", f"{h2} Tile sweep: n = {n}", ""]
+        out += images(charts, image_dir, ("tile_sweep", f"GFLOP/s by tile size at n = {n}"))
         out.append(table(["Tile", "1 thread GFLOP/s", "IPC", "L1D miss/FMA", "L2 miss/FMA",
                           f"{workers} workers GFLOP/s"], rows))
     return "\n".join(out) + "\n"
+
+
+README_START, README_END = "<!-- results:start -->", "<!-- results:end -->"
+
+
+def update_readme(path, results, label, charts, out):
+    """Replaces everything between the results markers of a README with the summary, one heading
+    level down so it nests under the README's title. The rest of the README is left alone."""
+    readme = Path(path)
+    text = readme.read_text()
+    start, end = text.find(README_START), text.find(README_END)
+    if start < 0 or end < start:
+        print(f"skipped {readme}: no {README_START} and {README_END} lines in it")
+        return
+    image_dir = Path(os.path.relpath(out, readme.parent)).as_posix()
+    section = summary(results, label, charts, image_dir, level=2)
+    # Blank lines around the section, so the end marker cannot run on into its last table.
+    readme.write_text(text[:start + len(README_START)] + "\n\n" + section + "\n" + text[end:])
+    print(f"updated {readme}")
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("results", help="JSON file written by make bench-run")
     parser.add_argument("--out", default="bench/plots", help="output directory (default: bench/plots)")
+    parser.add_argument("--readme", help=f"also put the summary in this README, between its {README_START} "
+                                         f"and {README_END} lines")
     args = parser.parse_args()
 
     results = Results(args.results)
@@ -581,6 +623,8 @@ def main():
     label = Path(args.results).stem
     (out / "summary.md").write_text(summary(results, label, written))
     print(f"wrote {out / 'summary.md'}")
+    if args.readme:
+        update_readme(args.readme, results, label, written, out)
     for failure in results.failed:
         print(f"FAILED correctness check: {failure}")
 

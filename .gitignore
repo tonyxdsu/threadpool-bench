@@ -18,3 +18,8 @@ bin/
 # Markdown (except READMEs)
 *.md
 !README.md
+!bench/plots/summary.md
+
+# Python bytecode cache
+__pycache__/
+*.pdf

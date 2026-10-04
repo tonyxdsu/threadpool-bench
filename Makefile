@@ -3,7 +3,10 @@ CXX = g++
 # -O3 -march=native: full optimization plus every instruction set this CPU supports
 # (AVX2/AVX-512, FMA). The binary may not run on other machines.
 # -g keeps debug symbols for gdb/perf; it does not slow the code down.
-OPTFLAGS = -O3 -march=native -g
+# -falign-loops=64 starts every loop on a 64-byte boundary. Without it, where a hot loop lands
+# depends on the size of everything linked before it: the blocked kernel's inner loop ran 25-45%
+# slower when it straddled two 64-byte lines, and unrelated code changes could flip that.
+OPTFLAGS = -O3 -march=native -g -falign-loops=64
 CXXFLAGS = -std=c++17 -Wall -Wextra -Iinclude -pthread $(OPTFLAGS)
 # -MMD -MP write a .d file per object listing the headers it includes, so editing a header
 # rebuilds everything that uses it. Without this, a benchmark can silently run stale code.
@@ -120,9 +123,10 @@ bench-run: $(BENCH_TARGET)
 bench-quick: $(BENCH_TARGET)
 	./$(BENCH_TARGET) $(BENCH_FLAGS) '--benchmark_filter=-n:(3000|4000)/' $(ARGS)
 
-# Charts and a summary table from a results file (needs: pip install matplotlib)
+# Charts and summary.md from a results file, with the summary also copied into README.md
+# between its results markers (needs: pip install matplotlib)
 bench-plot:
-	python3 $(BENCH_DIR)/plot.py $(RESULTS_DIR)/$(LABEL).json --out $(PLOTS_DIR)
+	python3 $(BENCH_DIR)/plot.py $(RESULTS_DIR)/$(LABEL).json --out $(PLOTS_DIR) --readme README.md
 
 # Statistical A/B comparison of two results files (needs: pip install scipy), e.g.
 #   make bench-compare BASE=22af068 LABEL=simd-v1
