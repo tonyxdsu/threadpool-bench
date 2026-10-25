@@ -53,6 +53,15 @@ BENCH_TARGET = $(BUILD_DIR)/bench
 # Extra linker flags, e.g. -L for a Google Benchmark built from source.
 BENCH_LDFLAGS ?=
 
+# Experiments (experiments/): standalone programs that each measure one CPU effect, timed with
+# the bench's PerfCounters. They run pinned to core EXP_CPU, so the scheduler cannot move them
+# between cores mid-measurement.
+EXP_DIR = experiments
+EXP_CPU ?= 2
+# Turns off the compiler's auto-vectorization, to measure a loop without SIMD.
+NO_SIMD_FLAGS = -fno-tree-vectorize -fno-tree-slp-vectorize
+CHAIN_DEMO_DEPS = $(EXP_DIR)/chain_demo.cpp $(BENCH_DIR)/perf_counters.cpp $(BENCH_DIR)/perf_counters.hpp
+
 # Benchmark runs. Results go to bench/results/<LABEL>.json. LABEL defaults to the commit the
 # sources came from, plus -dirty if they have uncommitted changes. Set it to name a run:
 #   make bench-run LABEL=simd-v1
@@ -104,6 +113,18 @@ $(BENCH_TARGET): $(LIB_OBJS) $(BENCH_OBJS)
 	@mkdir -p $(BUILD_DIR)
 	$(CXX) $(LIB_OBJS) $(BENCH_OBJS) $(BENCH_LDFLAGS) $(BENCH_LIBS) -o $(BENCH_TARGET)
 
+# Build the chain demo twice from one source, with and without SIMD. Each binary prints
+# EXP_CXXFLAGS, so its output says how it was built.
+$(BUILD_DIR)/chain_demo: $(CHAIN_DEMO_DEPS)
+	@mkdir -p $(BUILD_DIR)
+	$(CXX) $(CXXFLAGS) -I$(BENCH_DIR) -DEXP_CXXFLAGS='"$(CXXFLAGS)"' \
+		$(EXP_DIR)/chain_demo.cpp $(BENCH_DIR)/perf_counters.cpp -o $@
+
+$(BUILD_DIR)/chain_demo_nosimd: $(CHAIN_DEMO_DEPS)
+	@mkdir -p $(BUILD_DIR)
+	$(CXX) $(CXXFLAGS) $(NO_SIMD_FLAGS) -I$(BENCH_DIR) -DEXP_CXXFLAGS='"$(CXXFLAGS) $(NO_SIMD_FLAGS)"' \
+		$(EXP_DIR)/chain_demo.cpp $(BENCH_DIR)/perf_counters.cpp -o $@
+
 # Run tests
 test: $(TEST_TARGET)
 	./$(TEST_TARGET)
@@ -124,14 +145,22 @@ bench-quick: $(BENCH_TARGET)
 	./$(BENCH_TARGET) $(BENCH_FLAGS) '--benchmark_filter=-n:(3000|4000)/' $(ARGS)
 
 # Charts and summary.md from a results file, with the summary also copied into README.md
-# between its results markers (needs: pip install matplotlib)
+# between its results markers (needs: pip install matplotlib). BASE=<label> also draws that
+# earlier run for comparison, e.g. make bench-plot LABEL=v1 BASE=v0
 bench-plot:
-	python3 $(BENCH_DIR)/plot.py $(RESULTS_DIR)/$(LABEL).json --out $(PLOTS_DIR) --readme README.md
+	python3 $(BENCH_DIR)/plot.py $(RESULTS_DIR)/$(LABEL).json --out $(PLOTS_DIR) --readme README.md \
+		$(if $(BASE),--baseline $(RESULTS_DIR)/$(BASE).json)
 
 # Statistical A/B comparison of two results files (needs: pip install scipy), e.g.
 #   make bench-compare BASE=22af068 LABEL=simd-v1
 bench-compare:
 	python3 $(COMPARE_PY) benchmarks $(RESULTS_DIR)/$(BASE).json $(RESULTS_DIR)/$(LABEL).json
+
+# Loop-chain demo, about 1 minute: without SIMD, then with it. See experiments/Experiments.md.
+chain-demo: $(BUILD_DIR)/chain_demo_nosimd $(BUILD_DIR)/chain_demo
+	taskset -c $(EXP_CPU) ./$(BUILD_DIR)/chain_demo_nosimd
+	@echo
+	taskset -c $(EXP_CPU) ./$(BUILD_DIR)/chain_demo
 
 # Clean
 clean:
@@ -143,4 +172,4 @@ run: all
 
 -include $(wildcard $(BUILD_DIR)/*.d)
 
-.PHONY: all test bench bench-run bench-quick bench-plot bench-compare clean run
+.PHONY: all test bench bench-run bench-quick bench-plot bench-compare chain-demo clean run

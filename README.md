@@ -11,28 +11,127 @@ and OpenBLAS as a reference.
 | Which tile size is best, and why? | `BM_Blocked` and `BM_BlockedParallel` (8 workers), tile edge 8 to 512 | `tile_sweep` |
 | How far is this from a tuned library? | `BM_OpenBLAS`, same sizes and worker counts | `headline` |
 
+## v1: loop order i-k-j
+
+v1 changes one thing in `multiplyBlock`: the order of the loops inside a tile. The innermost loop
+now walks along a row of C instead of summing down a column of B. For each k block of a tile:
+
+```
+v0:  for i, for j:   sum = 0;  for k: sum += A[i][k] * B[k][j];  C[i][j] += sum
+v1:  for i, for k:   for j: C[i][j] += A[i][k] * B[k][j]
+```
+
+At n = 2000 and tile 48, single-threaded `multiplyBlocked` went from 7.04 to 12.3 GFLOP/s
+(1.74x), and `multiplyBlockedParallel` on 16 workers from 59.9 to 99.4 GFLOP/s (1.66x). The
+results below draw v0 as hollow markers and dashed lines. This run used v0's settings: the full
+suite, 5 interleaved repetitions, the same flags (`-falign-loops=64` aligns code, not data) and
+tile 48. The unchanged naive and OpenBLAS kernels came out within 3% of v0's run, except
+OpenBLAS on 16 threads, which is always noisy.
+
+| One thread, n = 2000, tile 48 | v0 | v1 |
+|---|---:|---:|
+| GFLOP/s | 7.04 | 12.3 |
+| FLOP/cycle (peak 32) | 1.49 | 2.58 |
+| Instructions per multiply-add | 9.35 | 1.95 |
+| Cycles per multiply-add | 1.34 | 0.78 |
+| IPC | 6.95 | 2.52 |
+
+### 1. The inner loop vectorizes
+
+GCC left v0's inner loop scalar for three reasons: the tail `break` gave it an early exit, it
+summed into one variable (vectorizing that reorders the additions, which GCC does only with
+`-ffast-math`), and it read B down a column, a whole row apart in memory. v1's inner loop reads a
+row of B and a row of C, both contiguous, multiplies by A[i][k], which is the same for every j,
+and gives each j its own element of C, so no addition is reordered. GCC compiles it to 512-bit
+vector instructions, 8 doubles each.
+
+![v0 visiting one 4 x 4 tile, one multiply-add at a time](docs/v1/traversal_v0.gif)
+
+![v1 visiting one 4 x 4 tile, one row of C at a time](docs/v1/traversal_v1.gif)
+
+The hot loops, from `objdump -d -C build/bench` (`sd` = scalar double, `pd` = packed double,
+`zmm` = 512 bits). v0, one multiply-add per pass:
+
+```
+inc     %rax                      # k++
+add     %rcx,%rdx                 # B pointer += one row
+cmp     %rsi,%rax                 # the tail check
+jae     ...
+vmovsd  (%r15,%rax,8),%xmm0       # A[i][k]
+vmulsd  (%rdx),%xmm0,%xmm0        # × B[k][j]
+vaddsd  %xmm0,%xmm1,%xmm1         # sum += ...   (xmm1 on every pass: the chain)
+cmp     %rdi,%rax                 # end of the k block?
+jne     ...
+```
+
+v1, eight multiply-adds per pass:
+
+```
+vbroadcastsd (%r8),%zmm3                # before the loop: A[i][k] in all 8 lanes
+vmovupd      (%r10,%r9,1),%zmm1         # 8 doubles of B's row k
+vfmadd213pd  (%rdx,%r9,1),%zmm3,%zmm1   # × A[i][k], + 8 doubles of C's row i
+vmovupd      %zmm1,(%rdx,%r9,1)         # store them to C
+add          $0x40,%r9                  # next 64 bytes
+cmp          %r9,0x110(%rsp)
+jne          ...
+```
+
+### 2. The add chain is (semi-)removed
+
+In v0 every add had to wait 2 cycles for the previous add's result in `sum`. In v1, consecutive
+multiply-adds go to different elements of C, so they can be in flight at the same time. Each
+element of C still gets its multiply-adds one after another, now as a load, an FMA and a store
+per k, but 47 other elements are updated between two updates of the same one.
+
+On its own this did not make v1 faster. v0's chains were only 48 adds long, and the out-of-order
+core already overlapped neighbouring ones: 1.34 cycles per multiply-add, not the 2 of a single
+chain. Built without SIMD (`-fno-tree-vectorize -fno-tree-slp-vectorize`,
+`bench/results/v1-nosimd.json`), v1 drops to 3.04 GFLOP/s, below v0's 7.04, mostly because GCC's
+scalar code for it keeps its loop pointers on the stack. The speedup comes from point 1; what
+point 2 contributes is independent elements of C, which let point 1 happen without reordering.
+
+### Notes
+
+- **IPC fell from 6.95 to 2.52, as expected.** A vector instruction does 8 multiply-adds, so v1
+  runs 4.8x fewer instructions per multiply-add, in 1.7x fewer cycles. Compare versions by
+  FLOP/cycle, not IPC.
+- **FMA came for free.** GCC's Zen tuning splits v0's multiply-add into `vmulsd` + `vaddsd` to
+  keep the 4-cycle FMA out of the add chain. With no chain, v1 gets `vfmadd213pd`.
+- **Alignment holds v1 back.** `std::vector` puts these matrices 16 bytes past a 64-byte
+  boundary, so every 64-byte load and store of B and C straddles two cache lines. At tile 48, 2 of
+  v1's 5 repetitions ran at 16.8-16.9 GFLOP/s, when C happened to land on a boundary, and 3 at
+  12.0-12.3, hence the 17% CV. With all three matrices aligned, a scratch test ran v1 at 4.27
+  FLOP/cycle instead of 2.60. Fixing that is v2.
+- **v1 wants a bigger tile.** The comparison keeps v0's tile, 48, but v1's tile sweep peaks at
+  256: 15.6 GFLOP/s on one thread and 119 on 8 workers, largely because a longer row spreads each
+  row's setup over more vector FMAs (0.98 instructions per multiply-add instead of 1.95).
+  `kBlockSize` should be re-picked for the next version.
+- **Next bottleneck:** C still makes a round trip through memory for every k: two loads and a
+  store per vector FMA.
+
 <!-- results:start -->
 
-## Benchmark results: v0
+## Benchmark results: v1
 
 - Machine: AMD Ryzen 7 9800X3D 8-Core Processor; 8 cores, 16 hardware threads; L1d 48 KiB and L2 1 MiB per core, L3 96 MiB shared by all 8 cores
-- Build: gcc 13.3.0, `-std=c++17 -Wall -Wextra -Iinclude -pthread -O3 -march=native -g -falign-loops=64`, git v0
+- Build: gcc 13.3.0, `-std=c++17 -Wall -Wextra -Iinclude -pthread -O3 -march=native -g -falign-loops=64`, git v1
 - Reference: OpenBLAS 0.3.26 NO_LAPACKE DYNAMIC_ARCH NO_AFFINITY Cooperlake MAX_THREADS=64 core=Cooperlake
-- Run: 2026-10-04T00:47:28-07:00, median of 5 repetitions, wall-clock time, every result checked with Freivalds' algorithm
+- Run: 2026-10-24T17:31:44-07:00, median of 5 repetitions, wall-clock time, every result checked with Freivalds' algorithm
+- Baseline: v0, run 2026-10-04T00:47:28-07:00. The charts draw its blocked kernels as hollow markers and dashed lines; "vs v0" columns are speedups over it.
 
 ### Headline: n = 2000, tile 48
 
 ![GFLOP/s of each implementation at n = 2000](bench/plots/headline.png)
 
-| Implementation | Threads | Time (ms) | GFLOP/s | vs naive | vs OpenBLAS, same threads | CV |
-|---|---:|---:|---:|---:|---:|---:|
-| multiplyNaive | 1 | 4,119 | 3.88 | 1x | 3.1% | 4.5% |
-| multiplyBlocked | 1 | 2,273 | 7.04 | 1.81x | 5.7% | 1.2% |
-| multiplyBlockedParallel | 8 | 339 | 47.2 | 12.1x | 9.2% | 1.6% |
-| multiplyBlockedParallel | 16 | 267 | 59.9 | 15.4x | 7.1% | 1.0% |
-| OpenBLAS dgemm | 1 | 130 | 123 | 31.8x | 100.0% | 1.4% |
-| OpenBLAS dgemm | 8 | 31.2 | 512 | 132x | 100.0% | 3.2% |
-| OpenBLAS dgemm | 16 | 19 | 840 | 216x | 100.0% | 2.7% |
+| Implementation | Threads | Time (ms) | GFLOP/s | vs naive | vs v0 | vs OpenBLAS, same threads | CV |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| multiplyNaive | 1 | 4,222 | 3.79 | 1x | - | 3.1% | 0.5% |
+| multiplyBlocked | 1 | 1,305 | 12.3 | 3.23x | 1.74x | 10.1% | 17.3% |
+| multiplyBlockedParallel | 8 | 217 | 73.7 | 19.4x | 1.56x | 14.1% | 2.5% |
+| multiplyBlockedParallel | 16 | 161 | 99.4 | 26.2x | 1.66x | 15.6% | 1.5% |
+| OpenBLAS dgemm | 1 | 132 | 121 | 32x | - | 100.0% | 0.7% |
+| OpenBLAS dgemm | 8 | 30.7 | 522 | 138x | - | 100.0% | 2.4% |
+| OpenBLAS dgemm | 16 | 25.1 | 637 | 168x | - | 100.0% | 29.9% |
 
 ### By matrix size, one thread
 
@@ -42,18 +141,18 @@ and OpenBLAS as a reference.
 
 GFLOP/s, then hardware-counter events per multiply-add (N = naive, B = blocked).
 
-| n | Naive | Blocked | Blocked / naive | OpenBLAS | L1D miss N | L1D miss B | L2 miss N | L2 miss B | DRAM fill N | DRAM fill B |
-|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| 100 | 6.22 | 7.17 | 1.15x | 143 | 0.132 | 0.0212 | 5.22e-05 | 4.55e-05 | 4.77e-07 | 8.98e-07 |
-| 200 | 5.66 | 7.15 | 1.26x | 108 | 0.13 | 0.0163 | 0.000504 | 0.00098 | 4.8e-06 | 2.77e-06 |
-| 300 | 5.23 | 7.13 | 1.36x | 112 | 0.135 | 0.0148 | 0.000751 | 0.00105 | 1.38e-05 | 8.06e-06 |
-| 500 | 4.85 | 7.22 | 1.49x | 115 | 0.162 | 0.0151 | 0.0284 | 0.00106 | 3.13e-05 | 1.73e-05 |
-| 700 | 4.83 | 7.13 | 1.48x | 120 | 0.562 | 0.0137 | 0.0483 | 0.00151 | 7.51e-05 | 2.65e-05 |
-| 1000 | 4.09 | 7.13 | 1.74x | 119 | 1.13 | 0.0136 | 0.0218 | 0.00232 | 7.12e-05 | 5.19e-05 |
-| 1500 | 3.9 | 7.13 | 1.83x | 121 | 1.13 | 0.0135 | 0.0456 | 0.00286 | 2.58e-05 | 7.75e-05 |
-| 2000 | 3.88 | 7.04 | 1.81x | 123 | 1.09 | 0.0141 | 0.0675 | 0.00319 | 6.06e-05 | 9.66e-05 |
-| 3000 | 1.8 | 7.02 | 3.91x | 125 | 1.13 | 0.0141 | 0.0881 | 0.00326 | 0.013 | 0.000454 |
-| 4000 | 1.12 | 7 | 6.25x | 125 | 1.16 | 0.0145 | 0.633 | 0.00347 | 0.0582 | 0.000986 |
+| n | Naive | Blocked | Blocked / naive | Blocked vs v0 | OpenBLAS | L1D miss N | L1D miss B | L2 miss N | L2 miss B | DRAM fill N | DRAM fill B |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 100 | 6.04 | 12.4 | 2.06x | 1.73x | 138 | 0.132 | 0.0216 | 7.93e-05 | 4.44e-05 | 1.22e-06 | 6.16e-07 |
+| 200 | 5.63 | 13.1 | 2.33x | 1.84x | 107 | 0.13 | 0.0179 | 0.000567 | 0.000734 | 5.3e-06 | 9.38e-07 |
+| 300 | 5.16 | 13.6 | 2.63x | 1.91x | 109 | 0.133 | 0.0167 | 0.000802 | 0.00126 | 1.73e-05 | 5.41e-06 |
+| 500 | 4.81 | 13.3 | 2.76x | 1.84x | 116 | 0.158 | 0.0173 | 0.0272 | 0.00172 | 3.72e-05 | 1.49e-05 |
+| 700 | 4.81 | 13.3 | 2.77x | 1.87x | 116 | 0.54 | 0.0153 | 0.0491 | 0.00241 | 7.51e-05 | 3.85e-05 |
+| 1000 | 3.98 | 14.3 | 3.60x | 2.01x | 118 | 1.13 | 0.016 | 0.027 | 0.00422 | 9.75e-05 | 5.47e-05 |
+| 1500 | 3.8 | 13.9 | 3.66x | 1.95x | 119 | 1.13 | 0.0152 | 0.0491 | 0.00503 | 2.24e-05 | 7.89e-05 |
+| 2000 | 3.79 | 12.3 | 3.23x | 1.74x | 121 | 1.09 | 0.015 | 0.0661 | 0.00531 | 0.000199 | 0.000102 |
+| 3000 | 1.79 | 12 | 6.70x | 1.70x | 122 | 1.13 | 0.0156 | 0.0864 | 0.00545 | 0.0135 | 0.000589 |
+| 4000 | 1.11 | 11.9 | 10.77x | 1.71x | 123 | 1.16 | 0.0157 | 0.635 | 0.00532 | 0.0636 | 0.00101 |
 
 ### Thread scaling: n = 2000, tile 48
 
@@ -61,36 +160,36 @@ GFLOP/s, then hardware-counter events per multiply-add (N = naive, B = blocked).
 
 Speedup is against single-threaded multiplyBlocked; efficiency divides it by the physical cores in use (at most 8). GHz is the average clock of the busy cores; IPC is per hardware thread.
 
-| Workers | Time (ms) | GFLOP/s | Speedup | Efficiency | GHz | IPC | L1D miss/FMA | OpenBLAS GFLOP/s | OpenBLAS speedup |
-|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| 1 | 2,243 | 7.13 | 1.01 | 101% | 5.05 | 6.95 | 0.0142 | 123 | 1 |
-| 2 | 1,190 | 13.4 | 1.91 | 96% | 5.04 | 6.6 | 0.0181 | 225 | 1.83 |
-| 4 | 615 | 26 | 3.69 | 92% | 5.07 | 6.36 | 0.0205 | 404 | 3.27 |
-| 6 | 425 | 37.6 | 5.34 | 89% | 5.09 | 6.12 | 0.0227 | 498 | 4.03 |
-| 8 | 339 | 47.2 | 6.7 | 84% | 5.09 | 5.75 | 0.0267 | 512 | 4.15 |
-| 10 | 302 | 53 | 7.53 | 94% | 5.08 | 5.2 | 0.0331 | 610 | 4.95 |
-| 12 | 280 | 57.2 | 8.13 | 102% | 5.07 | 4.72 | 0.0409 | 691 | 5.6 |
-| 14 | 270 | 59.2 | 8.41 | 105% | 5.04 | 4.18 | 0.0507 | 794 | 6.43 |
-| 16 | 267 | 59.9 | 8.51 | 106% | 4.99 | 3.78 | 0.0608 | 840 | 6.81 |
+| Workers | Time (ms) | GFLOP/s | vs v0 | Speedup | Efficiency | GHz | IPC | L1D miss/FMA | OpenBLAS GFLOP/s | OpenBLAS speedup |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 1,426 | 11.2 | 1.57x | 0.915 | 92% | 5.06 | 2.22 | 0.0147 | 121 | 1 |
+| 2 | 733 | 21.8 | 1.62x | 1.78 | 89% | 5.03 | 2.18 | 0.0207 | 230 | 1.9 |
+| 4 | 386 | 41.5 | 1.60x | 3.39 | 85% | 5.09 | 2.04 | 0.0271 | 397 | 3.27 |
+| 6 | 265 | 60.3 | 1.60x | 4.92 | 82% | 5.08 | 1.98 | 0.0315 | 506 | 4.18 |
+| 8 | 217 | 73.7 | 1.56x | 6.01 | 75% | 5.03 | 1.83 | 0.0475 | 522 | 4.31 |
+| 10 | 188 | 85.1 | 1.61x | 6.95 | 87% | 4.96 | 1.73 | 0.0624 | 606 | 5 |
+| 12 | 176 | 91.1 | 1.59x | 7.43 | 93% | 4.98 | 1.54 | 0.0893 | 688 | 5.68 |
+| 14 | 166 | 96.3 | 1.63x | 7.85 | 98% | 4.92 | 1.41 | 0.113 | 787 | 6.5 |
+| 16 | 161 | 99.4 | 1.66x | 8.11 | 101% | 4.71 | 1.34 | 0.13 | 637 | 5.26 |
 
 ### Tile sweep: n = 2000
 
 ![GFLOP/s by tile size at n = 2000](bench/plots/tile_sweep.png)
 
-| Tile | 1 thread GFLOP/s | IPC | L1D miss/FMA | L2 miss/FMA | 8 workers GFLOP/s |
-|---|---:|---:|---:|---:|---:|
-| 8 | 6.67 | 7.79 | 0.0492 | 0.00784 | 27.7 |
-| 16 | 7.04 | 7.38 | 0.0215 | 0.00509 | 38 |
-| 24 | 7.04 | 7.18 | 0.0151 | 0.00427 | 43.4 |
-| 32 | 7.01 | 6.96 | 0.0164 | 0.00531 | 46.7 |
-| 48 | 7.04 | 6.95 | 0.0141 | 0.00319 | 47.2 |
-| 64 | 6.52 | 6.28 | 0.0171 | 0.00249 | 42.4 |
-| 96 | 6.24 | 5.99 | 0.139 | 0.00132 | 40.6 |
-| 128 | 5.96 | 5.65 | 0.137 | 0.000856 | 39.3 |
-| 192 | 5.32 | 5.07 | 0.136 | 0.000675 | 35.5 |
-| 256 | 5.13 | 4.86 | 0.138 | 0.00155 | 33 |
-| 384 | 4.81 | 4.56 | 0.788 | 0.0546 | 29.1 |
-| 512 | 4.36 | 4.11 | 1.07 | 0.0931 | 26.8 |
+| Tile | 1 thread GFLOP/s | vs v0 | IPC | L1D miss/FMA | L2 miss/FMA | 8 workers GFLOP/s | vs v0 |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| 8 | 5.49 | 0.82x | 4.78 | 0.0495 | 0.0154 | 18.2 | 0.66x |
+| 16 | 8.04 | 1.14x | 3.73 | 0.0218 | 0.0106 | 35 | 0.92x |
+| 24 | 9.83 | 1.40x | 3.29 | 0.0181 | 0.0105 | 49.2 | 1.13x |
+| 32 | 10.9 | 1.56x | 2.95 | 0.0177 | 0.0083 | 60.9 | 1.30x |
+| 48 | 12.3 | 1.74x | 2.52 | 0.015 | 0.00531 | 73.7 | 1.56x |
+| 64 | 12.6 | 1.94x | 2.21 | 0.0539 | 0.00443 | 82 | 1.93x |
+| 96 | 12 | 1.93x | 1.71 | 0.156 | 0.00335 | 87.7 | 2.16x |
+| 128 | 13 | 2.19x | 1.67 | 0.149 | 0.00344 | 103 | 2.61x |
+| 192 | 14.9 | 2.81x | 1.68 | 0.142 | 0.00489 | 115 | 3.23x |
+| 256 | 15.6 | 3.05x | 1.6 | 0.138 | 0.0053 | 119 | 3.61x |
+| 384 | 15.4 | 3.21x | 1.48 | 0.137 | 0.0356 | 106 | 3.66x |
+| 512 | 15.2 | 3.49x | 1.38 | 0.138 | 0.0796 | 107 | 4.00x |
 
 <!-- results:end -->
 
@@ -115,7 +214,7 @@ against NumPy 1 and will not import next to it.
 | `make bench` | Build `build/bench` | |
 | `make bench-quick` | One repetition without n = 3000 and 4000. Prints only. | ~2 min |
 | `make bench-run` | Five interleaved repetitions, saved to `bench/results/<label>.json` | ~20 min |
-| `make bench-plot` | Charts and `summary.md` from that file into `bench/plots/`, and the results section of this README | seconds |
+| `make bench-plot` | Charts and `summary.md` from that file into `bench/plots/`, and the results section of this README. `BASE=<label>` also draws an earlier run for comparison. | seconds |
 | `make bench-compare BASE=<label>` | Compare two results files with a significance test | seconds |
 
 `<label>` defaults to `git describe --always --dirty`, so a run is named after the commit it
@@ -256,6 +355,11 @@ same tile size first, then re-run the tile sweep for the new kernel.
 `bench/plots/summary.md` shows every chart above the numbers behind it as Markdown tables. A
 chart that needs a benchmark the run did not include (for example `BM_Naive`, when filtered out)
 is skipped, and so are table columns with no data.
+
+To compare with an earlier version, add `BASE=<label>`, for example
+`make bench-plot LABEL=v1 BASE=v0` (`--baseline` for `plot.py`). The charts then also draw that
+run's blocked kernels as hollow markers and dashed lines, and the tables gain "vs v0" speedup
+columns.
 
 The results section near the top of this README is the same summary. `make bench-plot` rewrites
 everything between the `<!-- results:start -->` and `<!-- results:end -->` lines (invisible on
