@@ -2,10 +2,13 @@
 """Charts and a summary from a results file written by `make bench-run`.
 
     python3 bench/plot.py bench/results/<label>.json [--out bench/plots] [--readme README.md]
+                          [--baseline bench/results/<older label>.json]
 
 Each chart is written as <name>.png on a dark background. summary.md shows every chart above
 the numbers behind it, as Markdown tables. With --readme, the same summary also replaces
 whatever is between the <!-- results:start --> and <!-- results:end --> lines of that README.
+With --baseline, the charts also draw an earlier version's blocked kernels as hollow markers and
+dashed lines, and the tables gain "vs <older label>" speedup columns.
 """
 
 import argparse
@@ -33,6 +36,7 @@ THEME = {
 
 TIME_UNITS = {"ns": 1e-9, "us": 1e-6, "ms": 1e-3, "s": 1.0}
 COUNTERS = ("IPC", "GHz", "FLOP/cycle", "L1D_miss/FMA", "L2_miss/FMA", "L3_fill/FMA", "DRAM_fill/FMA")
+BASELINE_DASH = (0, (3, 2))   # line style of the --baseline version
 
 
 class Results:
@@ -40,6 +44,7 @@ class Results:
 
     def __init__(self, path):
         data = json.loads(Path(path).read_text())
+        self.label = Path(path).stem
         self.context = data["context"]
         self.failed = []
         repetitions, medians = {}, {}
@@ -176,10 +181,17 @@ def style_axes(ax, theme):
 
 
 def add_legend(fig, theme, entries, height, lines=True):
-    handles = [Line2D([0], [0], color=color, linewidth=2 if lines else 0, marker="o", markersize=6,
-                      markerfacecolor=color, markeredgecolor=theme["surface"])
-               for _, color in entries]
-    fig.legend(handles, [name for name, _ in entries], loc="upper left",
+    """entries are (name, color), or (name, color, True) for the --baseline version's style."""
+    handles = []
+    for name, color, *baseline in entries:
+        if baseline and baseline[0]:
+            handles.append(Line2D([0], [0], color=color, linewidth=1.2 if lines else 0, linestyle=BASELINE_DASH,
+                                  marker="o", markersize=5.5, markerfacecolor=theme["surface"],
+                                  markeredgecolor=color, markeredgewidth=1.3))
+        else:
+            handles.append(Line2D([0], [0], color=color, linewidth=2 if lines else 0, marker="o", markersize=6,
+                                  markerfacecolor=color, markeredgecolor=theme["surface"]))
+    fig.legend(handles, [entry[0] for entry in entries], loc="upper left",
                bbox_to_anchor=(0.25 / fig.get_figwidth(), 1 - 0.72 / height), ncol=len(entries),
                frameon=False, fontsize=9, labelcolor=theme["ink2"], handlelength=1.8,
                columnspacing=1.8, borderaxespad=0)
@@ -189,6 +201,17 @@ def plot_line(ax, theme, xs, ys, color, zorder=3):
     ax.plot(xs, ys, color=color, linewidth=2, solid_capstyle="round", solid_joinstyle="round",
             marker="o", markersize=6.5, markerfacecolor=color, markeredgecolor=theme["surface"],
             markeredgewidth=1.5, zorder=zorder)
+
+
+def plot_baseline(ax, theme, xs, ys, color):
+    """The --baseline version's medians: a thin dashed line with hollow markers, under this run's."""
+    ax.plot(xs, ys, color=color, linewidth=1.2, linestyle=BASELINE_DASH, marker="o", markersize=5.5,
+            markerfacecolor=theme["surface"], markeredgecolor=color, markeredgewidth=1.3, zorder=2.5)
+
+
+def baseline_entry(base, theme):
+    """The legend entry for the --baseline version."""
+    return (f"{base.label} (baseline)", theme["ink2"], True)
 
 
 def plot_ranges(ax, xs, lows, highs, color, horizontal=False):
@@ -220,11 +243,12 @@ def mark_x(ax, theme, x, text, ha="left"):
 # Charts
 # ---------------------------------------------------------------------------------------------
 
-def chart_throughput(results, theme):
+def chart_throughput(results, theme, base=None):
     naive = results.series("BM_Naive", "n")
     blocked = results.series("BM_Blocked", "n", bs=results.block_size)
     if not naive or not blocked:
         return None
+    old = base.series("BM_Blocked", "n", bs=base.block_size) if base else []
     height = 5.0
     fig, (ax,) = new_figure(
         theme, "Naive vs cache-blocked multiply, one thread",
@@ -241,6 +265,11 @@ def chart_throughput(results, theme):
         plot_line(ax, theme, xs, ys, color)
         label_point(ax, theme, xs[-1], ys[-1], f"{ys[-1]:.1f}")
         peak = max(peak, max(hi for _, hi in ranges))
+    entries = [("multiplyNaive", theme["naive"]), ("multiplyBlocked", theme["blocked"])]
+    if old:
+        plot_baseline(ax, theme, [n for n, _ in old], [gflops(n, p) for n, p in old], theme["blocked"])
+        peak = max(peak, max(gflops(n, p) for n, p in old))
+        entries.append(baseline_entry(base, theme))
     ax.set_xscale("log")
     fixed_ticks(ax.xaxis, sizes)
     ax.set_xlim(sizes[0] / 1.15, sizes[-1] * 1.25)
@@ -253,11 +282,11 @@ def chart_throughput(results, theme):
             n_fill = math.sqrt(cache["size"] / 24)   # three n x n matrices of 8-byte doubles
             if sizes[0] < n_fill < sizes[-1]:
                 mark_x(ax, theme, n_fill, f"A, B, C outgrow L{level}\n({fmt_bytes(cache['size'])})")
-    add_legend(fig, theme, [("multiplyNaive", theme["naive"]), ("multiplyBlocked", theme["blocked"])], height)
+    add_legend(fig, theme, entries, height)
     return fig
 
 
-def chart_cache(results, theme):
+def chart_cache(results, theme, base=None):   # base is not drawn: three log panels are busy enough
     naive = results.series("BM_Naive", "n")
     blocked = results.series("BM_Blocked", "n", bs=results.block_size)
     metrics = [(key, title) for key, title in (("L1D_miss/FMA", "Missed L1"), ("L2_miss/FMA", "Missed L2"),
@@ -305,7 +334,7 @@ def chart_cache(results, theme):
     return fig
 
 
-def chart_scaling(results, theme):
+def chart_scaling(results, theme, base=None):
     n = results.fixed_n
     serial = results.get("BM_Blocked", n=n, bs=results.block_size)
     ours = results.series("BM_BlockedParallel", "workers", n=n, bs=results.block_size)
@@ -334,14 +363,23 @@ def chart_scaling(results, theme):
         entries.append(("OpenBLAS", theme["openblas"]))
         lines.append((openblas, openblas_1, theme["openblas"]))
     top = 0.0
-    for points, base, color in lines:
+    for points, one_thread, color in lines:
         xs = [w for w, _ in points]
-        ys = [base["seconds"] / p["seconds"] for _, p in points]
-        highs = [base["seconds"] / p["fastest"] for _, p in points]
-        plot_ranges(ax, xs, [base["seconds"] / p["slowest"] for _, p in points], highs, color)
+        ys = [one_thread["seconds"] / p["seconds"] for _, p in points]
+        highs = [one_thread["seconds"] / p["fastest"] for _, p in points]
+        plot_ranges(ax, xs, [one_thread["seconds"] / p["slowest"] for _, p in points], highs, color)
         plot_line(ax, theme, xs, ys, color, zorder=4 if color == theme["blocked"] else 3)
         label_point(ax, theme, xs[-1], ys[-1], f"{ys[-1]:.1f}x")
         top = max(top, max(highs))
+    if base:
+        # The baseline's speedup against its own one-thread median, like the line above it.
+        base_serial = base.get("BM_Blocked", n=base.fixed_n, bs=base.block_size)
+        base_ours = base.series("BM_BlockedParallel", "workers", n=base.fixed_n, bs=base.block_size)
+        if base_serial and base_ours:
+            ys = [base_serial["seconds"] / p["seconds"] for _, p in base_ours]
+            plot_baseline(ax, theme, [w for w, _ in base_ours], ys, theme["blocked"])
+            top = max(top, max(ys))
+            entries.append(baseline_entry(base, theme))
     workers = sorted({w for w, _ in ours})
     fixed_ticks(ax.xaxis, workers)
     ax.set_xlim(0.4, max_workers + 0.6)
@@ -353,34 +391,41 @@ def chart_scaling(results, theme):
     return fig
 
 
-def chart_tiles(results, theme):
+def chart_tiles(results, theme, base=None):
     n = results.fixed_n
     workers = results.tile_sweep_workers()
-    panels = [(results.series("BM_Blocked", "bs", n=n), "1 thread (multiplyBlocked)")]
+    panels = [(results.series("BM_Blocked", "bs", n=n),
+               base.series("BM_Blocked", "bs", n=n) if base else [], "1 thread (multiplyBlocked)")]
     if workers:
         panels.append((results.series("BM_BlockedParallel", "bs", n=n, workers=workers),
+                       base.series("BM_BlockedParallel", "bs", n=n, workers=workers) if base else [],
                        f"{workers} workers (multiplyBlockedParallel)"))
-    panels = [(points, title) for points, title in panels if len(points) > 1]
+    panels = [panel for panel in panels if len(panel[0]) > 1]
     if not panels:
         return None
+    with_base = any(old for _, old, _ in panels)
     height = 4.4
     fig, axes = new_figure(
         theme, "Tile size sweep",
         f"GFLOP/s by tile edge at n = {n}, bars span the slowest to fastest run. "
         "Lines: where one tile of B (edge² x 8 bytes) fills L1 and L2.",
-        width=10.0, height=height, ncols=len(panels), legend=False)
-    for ax, (points, title) in zip(axes, panels):
+        width=10.0, height=height, ncols=len(panels), legend=with_base)
+    for ax, (points, old, title) in zip(axes, panels):
         xs = [bs for bs, _ in points]
         ys = [gflops(n, p) for _, p in points]
         ranges = [gflops_range(n, p) for _, p in points]
         plot_ranges(ax, xs, [lo for lo, _ in ranges], [hi for _, hi in ranges], theme["blocked"])
         plot_line(ax, theme, xs, ys, theme["blocked"])
+        top = max(hi for _, hi in ranges)
+        if old:
+            plot_baseline(ax, theme, [bs for bs, _ in old], [gflops(n, p) for _, p in old], theme["blocked"])
+            top = max(top, max(gflops(n, p) for _, p in old))
         best = max(range(len(xs)), key=lambda i: ys[i])
         label_point(ax, theme, xs[best], ranges[best][1], f"best: {xs[best]}", dy=10, dx=0, ha="center")
         ax.set_xscale("log", base=2)
         fixed_ticks(ax.xaxis, [x for x in xs if x & (x - 1) == 0])   # label the powers of two
         ax.set_xlim(xs[0] / 1.3, xs[-1] * 1.3)
-        ax.set_ylim(0, max(hi for _, hi in ranges) * 1.25)
+        ax.set_ylim(0, top * 1.25)
         ax.set_title(title, loc="left", fontsize=10, color=theme["ink"], pad=8)
         ax.set_xlabel("Tile edge (log scale)")
         ax.set_ylabel("GFLOP/s")
@@ -390,6 +435,8 @@ def chart_tiles(results, theme):
                 edge = math.sqrt(cache["size"] / 8)
                 if xs[0] < edge < xs[-1]:
                     mark_x(ax, theme, edge, f"L{level}", ha="left")
+    if with_base:
+        add_legend(fig, theme, [(results.label, theme["blocked"]), baseline_entry(base, theme)], height)
     return fig
 
 
@@ -410,11 +457,19 @@ def headline_rows(results):
     return [row for row in candidates if row[3] is not None]
 
 
-def chart_headline(results, theme):
+def baseline_headline(base):
+    """{(implementation, workers): point} of the --baseline version's blocked kernels, at its own tile."""
+    if not base:
+        return {}
+    return {(name, workers): point for name, key, workers, point in headline_rows(base) if key == "blocked"}
+
+
+def chart_headline(results, theme, base=None):
     rows = headline_rows(results)
     if len(rows) < 2:
         return None
     n = results.fixed_n
+    old_points = baseline_headline(base)
     height = 4.6
     fig, (ax,) = new_figure(
         theme, f"Matrix multiply throughput at n = {n}",
@@ -427,16 +482,29 @@ def chart_headline(results, theme):
     ax.grid(axis="y", which="major", visible=False)
     ax.grid(axis="x", which="major", color=theme["grid"], linewidth=0.8)
     ranges = [gflops_range(n, point) for _, _, _, point in rows]
-    for y, value, (low, high), (_, color_key, _, _) in zip(ys, values, ranges, rows):
+    olds = []
+    for y, value, (low, high), (name, color_key, workers, _) in zip(ys, values, ranges, rows):
         plot_ranges(ax, [y], [low], [high], theme[color_key], horizontal=True)
+        text = f"{value:.3g}"
+        old_point = old_points.get((name, workers))
+        if old_point:
+            # The baseline as a hollow marker, joined to this run's marker by a dashed line.
+            old = gflops(base.fixed_n, old_point)
+            olds.append(old)
+            ax.plot([old, value], [y, y], color=theme[color_key], linewidth=1.2, linestyle=BASELINE_DASH, zorder=2.4)
+            ax.plot([old], [y], marker="o", markersize=7, markerfacecolor=theme["surface"],
+                    markeredgecolor=theme[color_key], markeredgewidth=1.4, zorder=2.6)
+            text += f"   {value / old:.2f}x vs {base.label}"
+            high = max(high, old)
         ax.plot([value], [y], marker="o", markersize=8, color=theme[color_key],
                 markeredgecolor=theme["surface"], markeredgewidth=1.5, zorder=3)
-        label_point(ax, theme, high, y, f"{value:.3g}", dx=8)
-    lowest, highest = min(low for low, _ in ranges), max(high for _, high in ranges)
+        label_point(ax, theme, high, y, text, dx=8)
+    lowest = min([low for low, _ in ranges] + olds)
+    highest = max([high for _, high in ranges] + olds)
     ax.set_xscale("log")
     ticks = [t for t in (1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000) if lowest / 2 <= t <= highest * 2]
     fixed_ticks(ax.xaxis, ticks, lambda v: f"{v:g}")
-    ax.set_xlim(lowest / 1.6, highest * 2.2)
+    ax.set_xlim(lowest / 1.6, highest * (3.2 if olds else 2.2))   # room for the "vs" labels
     ax.set_yticks(ys)
     ax.set_yticklabels(labels)
     ax.tick_params(axis="y", length=0, labelsize=9)
@@ -446,6 +514,8 @@ def chart_headline(results, theme):
     entries = [("Naive", theme["naive"]), ("Blocked, yours", theme["blocked"])]
     if any(key == "openblas" for _, key, _, _ in rows):
         entries.append(("OpenBLAS reference", theme["openblas"]))
+    if olds:
+        entries.append(baseline_entry(base, theme))
     add_legend(fig, theme, entries, height, lines=False)
     return fig
 
@@ -485,9 +555,14 @@ def cache_summary(results):
     return ", ".join(f"{' and '.join(sizes)} {scope}".strip() for scope, sizes in groups.items())
 
 
-def summary(results, label, charts, image_dir="", level=1):
+def vs(old, point):
+    """How many times faster point is than old, the same benchmark in the --baseline version."""
+    return f"{old['seconds'] / point['seconds']:.2f}x" if old and point else "-"
+
+
+def summary(results, label, charts, image_dir="", level=1, base=None):
     """The summary as Markdown. image_dir is the charts' folder relative to the file the summary
-    goes in, and level is the heading level of its title."""
+    goes in, and level is the heading level of its title. base is the --baseline version or None."""
     ctx = results.context
     n, bs, cores = results.fixed_n, results.block_size, results.cores
     h1, h2 = "#" * level, "#" * (level + 1)
@@ -499,34 +574,42 @@ def summary(results, label, charts, image_dir="", level=1):
         out.append(f"- Reference: {ctx['openblas']}")
     out.append(f"- Run: {ctx.get('date', '')}, median of {results.repetitions()} repetitions, "
                f"wall-clock time, every result checked with Freivalds' algorithm")
+    if base:
+        out.append(f"- Baseline: {base.label}, run {base.context.get('date', '')}. The charts draw its blocked "
+                   f"kernels as hollow markers and dashed lines; \"vs {base.label}\" columns are speedups over it.")
     if results.failed:
         out += ["", "**Failed correctness check:**", ""] + [f"- {f}" for f in results.failed]
+    base_name = base.label if base else "baseline"   # column headers; the columns are dropped without one
 
     naive = results.get("BM_Naive", n=n)
+    old_points = baseline_headline(base)
     rows = []
     for name, _, workers, point in headline_rows(results):
         same_openblas = results.get("BM_OpenBLAS", n=n, workers=workers)
         rows.append([
             name, workers, fmt_ms(point["seconds"]), f"{gflops(n, point):.3g}",
             f"{naive['seconds'] / point['seconds']:.3g}x" if naive else "-",
+            vs(old_points.get((name, workers)), point),
             f"{same_openblas['seconds'] / point['seconds']:.1%}" if same_openblas else "-",
             f"{point['cv']:.1%}" if point["cv"] is not None else "-",
         ])
     if rows:
         out += ["", f"{h2} Headline: n = {n}, tile {bs}", ""]
         out += images(charts, image_dir, ("headline", f"GFLOP/s of each implementation at n = {n}"))
-        out.append(table(["Implementation", "Threads", "Time (ms)", "GFLOP/s", "vs naive",
+        out.append(table(["Implementation", "Threads", "Time (ms)", "GFLOP/s", "vs naive", f"vs {base_name}",
                           "vs OpenBLAS, same threads", "CV"], rows))
 
     naive_s = dict(results.series("BM_Naive", "n"))
     blocked_s = dict(results.series("BM_Blocked", "n", bs=bs))
     openblas_s = dict(results.series("BM_OpenBLAS", "n", workers=1))
+    old_s = dict(base.series("BM_Blocked", "n", bs=base.block_size)) if base else {}
     rows = []
     for size in sorted(set(naive_s) | set(blocked_s)):
         a, b, o = naive_s.get(size), blocked_s.get(size), openblas_s.get(size)
         rows.append([
             size, fmt_num(gflops(size, a) if a else None), fmt_num(gflops(size, b) if b else None),
-            f"{a['seconds'] / b['seconds']:.2f}x" if a and b else "-", fmt_num(gflops(size, o) if o else None),
+            f"{a['seconds'] / b['seconds']:.2f}x" if a and b else "-", vs(old_s.get(size), b),
+            fmt_num(gflops(size, o) if o else None),
             fmt_num(a and a.get("L1D_miss/FMA")), fmt_num(b and b.get("L1D_miss/FMA")),
             fmt_num(a and a.get("L2_miss/FMA")), fmt_num(b and b.get("L2_miss/FMA")),
             fmt_num(a and a.get("DRAM_fill/FMA")), fmt_num(b and b.get("DRAM_fill/FMA")),
@@ -536,18 +619,19 @@ def summary(results, label, charts, image_dir="", level=1):
         out += images(charts, image_dir, ("throughput_vs_size", "GFLOP/s of naive and blocked by matrix size"),
                       ("cache_misses", "Cache misses per multiply-add by matrix size"))
         out += ["GFLOP/s, then hardware-counter events per multiply-add (N = naive, B = blocked).", "",
-                table(["n", "Naive", "Blocked", "Blocked / naive", "OpenBLAS", "L1D miss N", "L1D miss B",
-                       "L2 miss N", "L2 miss B", "DRAM fill N", "DRAM fill B"], rows)]
+                table(["n", "Naive", "Blocked", "Blocked / naive", f"Blocked vs {base_name}", "OpenBLAS",
+                       "L1D miss N", "L1D miss B", "L2 miss N", "L2 miss B", "DRAM fill N", "DRAM fill B"], rows)]
 
     serial = results.get("BM_Blocked", n=n, bs=bs)
     openblas_1 = results.get("BM_OpenBLAS", n=n, workers=1)
     openblas_w = dict(results.series("BM_OpenBLAS", "workers", n=n))
+    old_w = dict(base.series("BM_BlockedParallel", "workers", n=n, bs=base.block_size)) if base else {}
     rows = []
     for workers, p in results.series("BM_BlockedParallel", "workers", n=n, bs=bs):
         speedup = serial["seconds"] / p["seconds"] if serial else None
         o = openblas_w.get(workers)
         rows.append([
-            workers, fmt_ms(p["seconds"]), f"{gflops(n, p):.3g}", fmt_num(speedup),
+            workers, fmt_ms(p["seconds"]), f"{gflops(n, p):.3g}", vs(old_w.get(workers), p), fmt_num(speedup),
             f"{speedup / min(workers, cores):.0%}" if speedup else "-",
             fmt_num(p.get("GHz")), fmt_num(p.get("IPC")), fmt_num(p.get("L1D_miss/FMA")),
             f"{gflops(n, o):.3g}" if o else "-",
@@ -558,28 +642,31 @@ def summary(results, label, charts, image_dir="", level=1):
         out += images(charts, image_dir, ("thread_scaling", f"Speedup by number of workers at n = {n}"))
         out += [f"Speedup is against single-threaded multiplyBlocked; efficiency divides it by the physical cores "
                 f"in use (at most {cores}). GHz is the average clock of the busy cores; IPC is per hardware thread.", "",
-                table(["Workers", "Time (ms)", "GFLOP/s", "Speedup", "Efficiency", "GHz", "IPC", "L1D miss/FMA",
-                       "OpenBLAS GFLOP/s", "OpenBLAS speedup"], rows)]
+                table(["Workers", "Time (ms)", "GFLOP/s", f"vs {base_name}", "Speedup", "Efficiency", "GHz", "IPC",
+                       "L1D miss/FMA", "OpenBLAS GFLOP/s", "OpenBLAS speedup"], rows)]
 
     workers = results.tile_sweep_workers()
     parallel_t = dict(results.series("BM_BlockedParallel", "bs", n=n, workers=workers)) if workers else {}
+    old_t = dict(base.series("BM_Blocked", "bs", n=n)) if base else {}
+    old_pt = dict(base.series("BM_BlockedParallel", "bs", n=n, workers=workers)) if base and workers else {}
     rows = []
     for tile, p in results.series("BM_Blocked", "bs", n=n):
         q = parallel_t.get(tile)
-        rows.append([tile, f"{gflops(n, p):.3g}", fmt_num(p.get("IPC")), fmt_num(p.get("L1D_miss/FMA")),
-                     fmt_num(p.get("L2_miss/FMA")), f"{gflops(n, q):.3g}" if q else "-"])
+        rows.append([tile, f"{gflops(n, p):.3g}", vs(old_t.get(tile), p), fmt_num(p.get("IPC")),
+                     fmt_num(p.get("L1D_miss/FMA")), fmt_num(p.get("L2_miss/FMA")),
+                     f"{gflops(n, q):.3g}" if q else "-", vs(old_pt.get(tile), q)])
     if rows:
         out += ["", f"{h2} Tile sweep: n = {n}", ""]
         out += images(charts, image_dir, ("tile_sweep", f"GFLOP/s by tile size at n = {n}"))
-        out.append(table(["Tile", "1 thread GFLOP/s", "IPC", "L1D miss/FMA", "L2 miss/FMA",
-                          f"{workers} workers GFLOP/s"], rows))
+        out.append(table(["Tile", "1 thread GFLOP/s", f"vs {base_name}", "IPC", "L1D miss/FMA", "L2 miss/FMA",
+                          f"{workers} workers GFLOP/s", f"vs {base_name}"], rows))
     return "\n".join(out) + "\n"
 
 
 README_START, README_END = "<!-- results:start -->", "<!-- results:end -->"
 
 
-def update_readme(path, results, label, charts, out):
+def update_readme(path, results, label, charts, out, base=None):
     """Replaces everything between the results markers of a README with the summary, one heading
     level down so it nests under the README's title. The rest of the README is left alone."""
     readme = Path(path)
@@ -589,7 +676,7 @@ def update_readme(path, results, label, charts, out):
         print(f"skipped {readme}: no {README_START} and {README_END} lines in it")
         return
     image_dir = Path(os.path.relpath(out, readme.parent)).as_posix()
-    section = summary(results, label, charts, image_dir, level=2)
+    section = summary(results, label, charts, image_dir, level=2, base=base)
     # Blank lines around the section, so the end marker cannot run on into its last table.
     readme.write_text(text[:start + len(README_START)] + "\n\n" + section + "\n" + text[end:])
     print(f"updated {readme}")
@@ -601,9 +688,11 @@ def main():
     parser.add_argument("--out", default="bench/plots", help="output directory (default: bench/plots)")
     parser.add_argument("--readme", help=f"also put the summary in this README, between its {README_START} "
                                          f"and {README_END} lines")
+    parser.add_argument("--baseline", help="results file of an earlier version to compare against")
     args = parser.parse_args()
 
     results = Results(args.results)
+    base = Results(args.baseline) if args.baseline else None
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
     charts = {"headline": chart_headline, "throughput_vs_size": chart_throughput,
@@ -611,7 +700,7 @@ def main():
     written = set()
     for name, make in charts.items():
         path = out / f"{name}.png"
-        fig = make(results, THEME)
+        fig = make(results, THEME, base)
         if fig is None:
             path.unlink(missing_ok=True)   # so the folder never mixes in a chart from an older run
             print(f"skipped {name}: no data for it in {args.results}")
@@ -621,10 +710,10 @@ def main():
         written.add(name)
         print(f"wrote {path}")
     label = Path(args.results).stem
-    (out / "summary.md").write_text(summary(results, label, written))
+    (out / "summary.md").write_text(summary(results, label, written, base=base))
     print(f"wrote {out / 'summary.md'}")
     if args.readme:
-        update_readme(args.readme, results, label, written, out)
+        update_readme(args.readme, results, label, written, out, base)
     for failure in results.failed:
         print(f"FAILED correctness check: {failure}")
 

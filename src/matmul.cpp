@@ -62,7 +62,8 @@ Matrix multiplyBlocked(const Matrix& A, const Matrix& B, std::size_t blockSize) 
     return C;
 }
 
-// rowStart, rowEnd, colStart, colEnd are inclusive
+// rowStart, rowEnd, colStart, colEnd are inclusive 
+// and denote the position of the output tile
 void multiplyBlock(const Matrix& A, const Matrix& B, Matrix& C,
                    std::size_t rowStart, std::size_t rowEnd,
                    std::size_t colStart, std::size_t colEnd,
@@ -72,21 +73,17 @@ void multiplyBlock(const Matrix& A, const Matrix& B, Matrix& C,
     if (A.cols % blockSize != 0) {
         numBlocksInner += 1;
     }
-    
+
     for (size_t b = 0; b < numBlocksInner; b++) {
         for (size_t i = rowStart; i < rowEnd; i++) {
-            for (size_t j = colStart; j < colEnd; j++) {
-                double sum = 0;
-                for (size_t k = 0; k < blockSize; k++) {
-                    size_t AColBRow = b * blockSize + k;
-                    if (AColBRow >= A.cols) {
-                        // TODO this is bad but slightly less bad to assume 
-                        // if statements are rarely taken for branch predictor?
+            for (size_t k = 0; k < blockSize; k++) {
+                size_t AColBRow = b * blockSize + k;
+                if (AColBRow >= A.cols) {
                         break;
-                    }
-                    sum += A.at(i, AColBRow) * B.at(AColBRow, j);
                 }
-                C.at(i, j) += sum;
+                for (size_t j = colStart; j < colEnd; j++) {
+                    C.at(i, j) += A.at(i, AColBRow) * B.at(AColBRow, j);
+                }
             }
         }
     }
